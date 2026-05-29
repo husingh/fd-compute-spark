@@ -1,0 +1,39 @@
+[debug] Packaging /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/fd-compute-spark_2.13-0.1.jar ...
+[debug] Input file mappings:
+[debug] 	com
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com
+[debug] 	com/fd
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd
+[debug] 	com/fd/compute
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute
+[debug] 	com/fd/compute/StackDistanceReduceJob$SerialKeyPartitioner.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/StackDistanceReduceJob$SerialKeyPartitioner.class
+[debug] 	com/fd/compute/StackDistanceReduceJob.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/StackDistanceReduceJob.class
+[debug] 	com/fd/compute/StackDistanceMapJob.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/StackDistanceMapJob.class
+[debug] 	com/fd/compute/StackDistancePipelineJob.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/StackDistancePipelineJob.class
+[debug] 	com/fd/compute/FDComputeNative.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/FDComputeNative.class
+[debug] 	com/fd/compute/StackDistanceReduceJob$$anon$1.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/StackDistanceReduceJob$$anon$1.class
+[debug] 	com/fd/compute/StackDistanceMapJob$$anon$1.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/StackDistanceMapJob$$anon$1.class
+[debug] 	com/fd/compute/StackDistancePipelineJob$$anon$1.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/StackDistancePipelineJob$$anon$1.class
+[debug] 	com/fd/compute/StackDistancePipelineJob$$anon$3.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/StackDistancePipelineJob$$anon$3.class
+[debug] 	com/fd/compute/StackDistanceMapJob$.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/StackDistanceMapJob$.class
+[debug] 	com/fd/compute/FDComputeNative$.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/FDComputeNative$.class
+[debug] 	com/fd/compute/StackDistancePipelineJob$$anon$2.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/StackDistancePipelineJob$$anon$2.class
+[debug] 	com/fd/compute/StackDistancePipelineJob$SerialKeyPartitioner.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/StackDistancePipelineJob$SerialKeyPartitioner.class
+[debug] 	com/fd/compute/StackDistancePipelineJob$.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/StackDistancePipelineJob$.class
+[debug] 	com/fd/compute/StackDistanceReduceJob$.class
+[debug] 	  /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes/com/fd/compute/StackDistanceReduceJob$.class
+[debug] Done packaging.
