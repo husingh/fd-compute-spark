@@ -7,15 +7,21 @@
 // Native method signatures match:
 //   package com.fd.compute
 //   class FDComputeNative {
-//     @native def mapperInit(inputFilename: String): Long
+//     @native def mapperInit(inputFilename: String, envOverrides: String): Long
 //     @native def mapperProcessBatch(handle: Long, batch: String): String
 //     @native def mapperFinalize(handle: Long): Unit
 //   }
+//
+// envOverrides is a newline-separated list of KEY=value pairs.
+// Any key whose value is an S3 path will have been pre-downloaded by Scala
+// to a local temp path, and that local path is what arrives here.
+// We call setenv() for each pair before readConfig() runs inside mapperInit().
 // ---------------------------------------------------------------------------
 
 #include <jni.h>
 #include <string>
 #include <cstring>
+#include <cstdlib>
 #include <mutex>
 #include "stack_distance.map.h"
 
@@ -40,13 +46,38 @@ static std::string jstr(JNIEnv *env, jstring js) {
 }
 
 // ---------------------------------------------------------------------------
-// mapperInit(inputFilename: String): Long
+// Helper: parse "KEY=value\nKEY2=value2\n..." and call setenv() for each pair.
+// Called inside the init mutex, before readConfig().
+// ---------------------------------------------------------------------------
+static void applyEnvOverrides(const std::string &overrides) {
+    if (overrides.empty()) return ;
+    char *buf = strdup(overrides.c_str()) ;
+    char *line = strtok(buf, "\n") ;
+    while (line) {
+        char *eq = strchr(line, '=') ;
+        if (eq) {
+            *eq = '\0' ;
+            setenv(line, eq + 1, /*overwrite=*/1) ;
+            fprintf(stderr, "[JNI] setenv %s=%s\n", line, eq + 1) ;
+            *eq = '=' ;   // restore for safety (not strictly needed)
+        }
+        line = strtok(NULL, "\n") ;
+    }
+    free(buf) ;
+}
+
+// ---------------------------------------------------------------------------
+// mapperInit(inputFilename: String, envOverrides: String): Long
 // ---------------------------------------------------------------------------
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_fd_compute_FDComputeNative_mapperInit(JNIEnv *env, jobject /*obj*/, jstring jInputFilename) {
-    std::string filename = jstr(env, jInputFilename) ;
+Java_com_fd_compute_FDComputeNative_mapperInit(JNIEnv *env, jobject /*obj*/,
+                                               jstring jInputFilename,
+                                               jstring jEnvOverrides) {
+    std::string filename  = jstr(env, jInputFilename) ;
+    std::string overrides = jstr(env, jEnvOverrides) ;
     std::lock_guard<std::mutex> lock(g_init_mutex) ;  // serialize readConfig() calls
+    applyEnvOverrides(overrides) ;                     // setenv before readConfig()
     MapperCtx *ctx = mapperInit(filename.c_str()) ;
     return reinterpret_cast<jlong>(ctx) ;
 }

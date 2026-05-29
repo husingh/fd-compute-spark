@@ -1,23 +1,2 @@
 [debug] Created transactional ClassFileManager with tempDir = /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes.bak
-[debug] About to delete class files:
-[debug] 	StackDistancePipelineJob$.class
-[debug] 	StackDistancePipelineJob.class
-[debug] 	StackDistancePipelineJob$$anon$3.class
-[debug] 	StackDistancePipelineJob$$anon$2.class
-[debug] 	StackDistancePipelineJob$SerialKeyPartitioner.class
-[debug] 	StackDistancePipelineJob$$anon$1.class
-[debug] We backup class files:
-[debug] 	StackDistancePipelineJob$.class
-[debug] 	StackDistancePipelineJob.class
-[debug] 	StackDistancePipelineJob$$anon$3.class
-[debug] 	StackDistancePipelineJob$$anon$2.class
-[debug] 	StackDistancePipelineJob$SerialKeyPartitioner.class
-[debug] 	StackDistancePipelineJob$$anon$1.class
-[debug] Registering generated classes:
-[debug] 	StackDistancePipelineJob$.class
-[debug] 	StackDistancePipelineJob.class
-[debug] 	StackDistancePipelineJob$$anon$3.class
-[debug] 	StackDistancePipelineJob$$anon$2.class
-[debug] 	StackDistancePipelineJob$SerialKeyPartitioner.class
-[debug] 	StackDistancePipelineJob$$anon$1.class
 [debug] Removing the temporary directory used for backing up class files: /Users/ansabni/Work/MoveToSpark/fd-compute-spark/target/scala-2.13/classes.bak

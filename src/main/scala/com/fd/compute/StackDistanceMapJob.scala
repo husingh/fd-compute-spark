@@ -82,7 +82,7 @@ object StackDistanceMapJob {
       //   - Ghost-IP filtering by filename is not used in Spark mode;
       //     filter input paths upstream if needed.
       // ------------------------------------------------------------------
-      val handle = FDComputeNative.mapperInit("")
+      val handle = FDComputeNative.mapperInit("", "")
 
       // ------------------------------------------------------------------
       // Process: feed lines in batches of BATCH_SIZE

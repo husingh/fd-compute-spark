@@ -105,7 +105,7 @@ object StackDistanceReduceJob {
       val native      = FDComputeNative
 
       // Init: reads FD_MAPREDUCE_* env vars, sets stdtime_extension from partitionId
-      native.reducerInit(partitionId, numReducers)
+      native.reducerInit(partitionId, numReducers, "")
 
       // Process in batches — value is the original mapper output line
       iter

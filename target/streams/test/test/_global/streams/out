@@ -1,0 +1,28 @@
+[debug] javaOptions: Vector(-Djava.library.path=/Users/ansabni/Work/MoveToSpark/fd-compute-spark/lib, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.base/java.lang=ALL-UNNAMED)
+[debug] Forking tests - parallelism = false
+[debug] Create a single-thread test executor
+[debug] Runner for org.scalatest.tools.Framework produced 1 initial tasks for 1 tests.
+[debug]   Running TaskDef(com.fd.compute.DownloadS3ConfigFilesTest, sbt.ForkMain$SubclassFingerscan@148080bb, false, [SuiteSelector])
+[info] DownloadS3ConfigFilesTest:
+[info] - parseOverrides: empty string produces empty map
+[info] - parseOverrides: single KEY=value pair
+[info] - parseOverrides: multiple KEY=value pairs separated by newline
+[info] - parseOverrides: value containing '=' sign is preserved correctly
+[info] - parseOverrides: trailing newline is ignored
+[info] - downloadS3ConfigFiles: env var not set → no override emitted
+[info] - downloadS3ConfigFiles: env var set to local path → no override emitted
+[info] - downloadS3ConfigFiles: s3:// path → override emitted with correct KEY and local filename
+[info] - downloadS3ConfigFiles: s3a:// prefix also works
+[info] - downloadS3ConfigFiles: .keyN suffix stripped from local filename
+[info] - downloadS3ConfigFiles: multiple vars → all overrides returned
+[info] - downloadS3ConfigFiles: missing encryption key → throws IllegalArgumentException
+[info] - downloadS3ConfigFiles: only the 7 known _FILE vars are processed
+[info] - keyIndexOf: extracts correct key index from s3 path
+[debug]     Produced 0 nested tasks and 14 events.
+[info] Run completed in 800 milliseconds.
+[info] Total number of tests run: 14
+[info] Suites: completed 1, aborted 0
+[info] Tests: succeeded 14, failed 0, canceled 0, ignored 0, pending 0
+[info] All tests passed.
+[debug] Passed tests:
+[debug] 	com.fd.compute.DownloadS3ConfigFilesTest

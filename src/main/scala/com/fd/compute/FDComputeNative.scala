@@ -20,12 +20,14 @@ class FDComputeNative {
    * Initialise the C++ mapper for one Spark partition.
    * Reads all FD_MAPREDUCE_* config directly from env vars via getenv().
    *
-   * @param inputFilename  Source log filename — used only for ghost-IP
-   *                       resolution (FD_MAPREDUCE_GHOSTIP).  Pass "" when
-   *                       not applicable (Spark mode without ghost filtering).
+   * @param inputFilename  Source log filename (pass "" in Spark mode).
+   * @param envOverrides   Newline-separated "KEY=localPath" pairs for any
+   *                       FD_MAPREDUCE_*_FILE vars whose S3 files were
+   *                       pre-downloaded to local temp paths by Spark.
+   *                       Pass "" if no file vars are needed.
    * @return  Opaque handle (pointer to MapperCtx) to pass to subsequent calls.
    */
-  @native def mapperInit(inputFilename: String): Long
+  @native def mapperInit(inputFilename: String, envOverrides: String): Long
 
   /**
    * Process a batch of raw CDN log lines.
@@ -54,16 +56,13 @@ class FDComputeNative {
   /**
    * Initialise the C++ reducer for one Spark partition.
    *
-   * Sets mapreduce_task_partition and mapreduce_job_reduces via setenv() so
-   * readConfig() inside C++ derives the correct stdtime_extension for the
-   * output file name (e.g. "stdtime.1193").
-   *
-   * @param partitionId  Spark partition index (0-based) — equivalent to
-   *                     Hadoop's mapreduce_task_partition.
-   * @param numReducers  Total number of reduce partitions — equivalent to
-   *                     Hadoop's mapreduce_job_reduces.
+   * @param partitionId   Spark partition index (0-based).
+   * @param numReducers   Total number of reduce partitions.
+   * @param envOverrides  Newline-separated "KEY=localPath" pairs for any
+   *                      FD_MAPREDUCE_*_FILE vars pre-downloaded from S3.
+   *                      Pass "" if no file vars are needed.
    */
-  @native def reducerInit(partitionId: Int, numReducers: Int): Unit
+  @native def reducerInit(partitionId: Int, numReducers: Int, envOverrides: String): Unit
 
   /**
    * Process a batch of mapper output lines.

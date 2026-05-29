@@ -88,6 +88,71 @@ object StackDistancePipelineJob {
     m.map(_.group(1)).getOrElse("1")
   }
 
+  // All FD_MAPREDUCE_*_FILE env vars that point to INPUT files the C++ code
+  // reads via fopen().  (FD_MAPREDUCE_WRITE_SERIAL_INFO_FILE is an output path
+  // written by C++, not a download target.)
+  val S3_FILE_ENV_VARS: Seq[String] = Seq(
+    "FD_MAPREDUCE_VCDS_FILE",
+    "FD_MAPREDUCE_CPCODES_FILE",
+    "FD_MAPREDUCE_REGIONS_FILE",
+    "FD_MAPREDUCE_GHOSTIP_FILE",
+    "FD_MAPREDUCE_CPCODE_MAP_FILE",
+    "FD_MAPREDUCE_VCD_MAP_NETWORK_FILE",
+    "FD_MAPREDUCE_ARL_VCD_TRANSLATION_FILE"
+  )
+
+  /**
+   * For each FD_MAPREDUCE_*_FILE env var whose value starts with s3:// or s3a://,
+   * download the file to a task-local temp directory and return a newline-separated
+   * string of "KEY=/local/path" pairs to pass to mapperInit / reducerInit.
+   *
+   * Vars that are not set, or that already point to local paths, are skipped —
+   * C++ will handle them as-is via getenv().
+   *
+   * @param accessKey      S3 access key
+   * @param secretKey      S3 secret key
+   * @param encryptionKeys Map of key index → base64 SSE-C key
+   * @param taskTempDir    Directory to download files into (must already exist)
+   */
+  def downloadS3ConfigFiles(
+    accessKey:      String,
+    secretKey:      String,
+    encryptionKeys: Map[String, String],
+    taskTempDir:    java.io.File
+  ): String = {
+    val overrides = scala.collection.mutable.ArrayBuffer[String]()
+    for (varName <- S3_FILE_ENV_VARS) {
+      sys.env.get(varName) match {
+        case Some(v) if v.startsWith("s3://") || v.startsWith("s3a://") =>
+          val s3Path    = if (v.startsWith("s3://")) "s3a://" + v.stripPrefix("s3://") else v
+          val keyIdx    = keyIndexOf(s3Path)
+          val sseKey    = encryptionKeys.getOrElse(keyIdx,
+            throw new IllegalArgumentException(
+              s"No encryption key for index '$keyIdx' needed by $varName=$v"))
+          val fileName  = s3Path.split("/").last.replaceAll("""\.key\d+$""", "")
+          val localFile = new java.io.File(taskTempDir, fileName)
+          println(s"[S3 config] Downloading $varName from $s3Path → ${localFile.getAbsolutePath}")
+          val conf = s3aConf(accessKey, secretKey, sseKey)
+          val path = new org.apache.hadoop.fs.Path(s3Path)
+          val fs   = org.apache.hadoop.fs.FileSystem.get(path.toUri, conf)
+          val in   = fs.open(path)
+          val out  = new java.io.FileOutputStream(localFile)
+          try {
+            val buf = new Array[Byte](64 * 1024)
+            var n = in.read(buf)
+            while (n > 0) { out.write(buf, 0, n); n = in.read(buf) }
+          } finally { in.close(); out.close(); fs.close() }
+          println(s"[S3 config]   → ${localFile.length()} bytes")
+          overrides += s"$varName=${localFile.getAbsolutePath}"
+        case Some(_) =>
+          // Already a local path — C++ opens it directly, nothing to do
+        case None =>
+          // Not set — C++ will just skip it
+      }
+    }
+    overrides.mkString("\n")
+  }
+
   /**
    * Build a Hadoop Configuration for S3A with SSE-C decryption.
    * Called on executors (serializable pieces only — String args).
@@ -249,7 +314,19 @@ object StackDistancePipelineJob {
       .repartition(numMappers)
       .mapPartitions { iter =>
 
-        val handle = FDComputeNative.mapperInit("")
+        val ak   = bcAccessKey.value
+        val sk   = bcSecretKey.value
+        val keys = bcEncryptionKeys.value
+
+        // Download any FD_MAPREDUCE_*_FILE env vars that point to S3
+        val taskId      = Thread.currentThread().getId
+        val cfgTempDir  = new java.io.File(s"/tmp/fd_cfg_$taskId")
+        cfgTempDir.mkdirs()
+        val envOverrides = downloadS3ConfigFiles(ak, sk, keys, cfgTempDir)
+        if (envOverrides.nonEmpty)
+          println(s"[mapper] Env overrides for C++ readConfig:\n${envOverrides.linesIterator.map("  " + _).mkString("\n")}")
+
+        val handle = FDComputeNative.mapperInit("", envOverrides)
 
         val outputLines = iter
           .grouped(mapperBatchSize)
@@ -354,8 +431,19 @@ object StackDistancePipelineJob {
     sorted.foreachPartition { iter =>
       val partitionId = TaskContext.get().partitionId()
       val native      = FDComputeNative
+      val ak          = bcAccessKey.value
+      val sk          = bcSecretKey.value
+      val keys        = bcEncryptionKeys.value
 
-      native.reducerInit(partitionId, numReducers)
+      // Download any FD_MAPREDUCE_*_FILE env vars that point to S3
+      val taskId      = Thread.currentThread().getId
+      val cfgTempDir  = new java.io.File(s"/tmp/fd_cfg_reduce_$taskId")
+      cfgTempDir.mkdirs()
+      val envOverrides = downloadS3ConfigFiles(ak, sk, keys, cfgTempDir)
+      if (envOverrides.nonEmpty)
+        println(s"[reducer p$partitionId] Env overrides for C++ readConfig:\n${envOverrides.linesIterator.map("  " + _).mkString("\n")}")
+
+      native.reducerInit(partitionId, numReducers, envOverrides)
 
       iter
         .map(_._2)

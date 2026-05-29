@@ -15,7 +15,10 @@ libraryDependencies ++= Seq(
   "com.amazonaws"     % "aws-java-sdk-bundle" % "1.12.262",
 
   // Lightweight JSON parsing for encryption_keys.json
-  "com.fasterxml.jackson.core" % "jackson-databind" % "2.15.2"
+  "com.fasterxml.jackson.core" % "jackson-databind" % "2.15.2",
+
+  // Test framework
+  "org.scalatest" %% "scalatest" % "3.2.19" % Test
 )
 
 // Make "provided" deps visible on the classpath when using `sbt run`
