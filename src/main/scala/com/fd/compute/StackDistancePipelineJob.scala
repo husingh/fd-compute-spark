@@ -319,7 +319,7 @@ object StackDistancePipelineJob {
         val keys = bcEncryptionKeys.value
 
         // Download any FD_MAPREDUCE_*_FILE env vars that point to S3
-        val taskId      = Thread.currentThread().getId
+        val taskId      = java.util.UUID.randomUUID().toString
         val cfgTempDir  = new java.io.File(s"/tmp/fd_cfg_$taskId")
         cfgTempDir.mkdirs()
         val envOverrides = downloadS3ConfigFiles(ak, sk, keys, cfgTempDir)
@@ -436,7 +436,7 @@ object StackDistancePipelineJob {
       val keys        = bcEncryptionKeys.value
 
       // Download any FD_MAPREDUCE_*_FILE env vars that point to S3
-      val taskId      = Thread.currentThread().getId
+      val taskId      = java.util.UUID.randomUUID().toString
       val cfgTempDir  = new java.io.File(s"/tmp/fd_cfg_reduce_$taskId")
       cfgTempDir.mkdirs()
       val envOverrides = downloadS3ConfigFiles(ak, sk, keys, cfgTempDir)
