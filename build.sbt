@@ -42,6 +42,27 @@ Test / javaOptions ++= Seq(
   "--add-opens=java.base/java.lang=ALL-UNNAMED"
 )
 
+// ---------------------------------------------------------------------------
+// Bundle native libs into the jar as resources under "native/".
+// Picks up whichever of libFDCompute.so / libFDCompute.dylib exist in lib/.
+// FDComputeNative.ensureLoaded() extracts them at runtime.
+// ---------------------------------------------------------------------------
+Compile / resourceGenerators += Def.task {
+  val libDir   = baseDirectory.value / "lib"
+  val outDir   = (Compile / resourceManaged).value / "native"
+  IO.createDirectory(outDir)
+  val candidates = Seq("libFDCompute.so", "libFDCompute.dylib")
+  candidates.flatMap { name =>
+    val src = libDir / name
+    if (src.exists()) {
+      val dst = outDir / name
+      IO.copyFile(src, dst)
+      streams.value.log.info(s"[native] bundling $src → resource native/$name")
+      Some(dst)
+    } else None
+  }
+}.taskValue
+
 // Fat JAR: bundle Scala stdlib + all deps; exclude Spark (provided by cluster)
 assembly / assemblyMergeStrategy := {
   case PathList("META-INF", xs @ _*) => xs match {

@@ -83,19 +83,62 @@ class FDComputeNative {
 object FDComputeNative extends FDComputeNative {
   @volatile private var loaded = false
 
+  /** Pick the right native filename for the running platform. */
+  private def platformLibName(): String = {
+    val os = System.getProperty("os.name", "").toLowerCase
+    if (os.contains("mac") || os.contains("darwin")) "libFDCompute.dylib"
+    else                                             "libFDCompute.so"
+  }
+
+  /**
+   * Extract the bundled native lib from the jar (resource path "/native/<name>")
+   * to a temp file and System.load() it. Returns true if successful.
+   */
+  private def loadFromJar(): Boolean = {
+    val name = platformLibName()
+    val resourcePath = s"/native/$name"
+    val in = getClass.getResourceAsStream(resourcePath)
+    if (in == null) {
+      System.err.println(s"[FDComputeNative] no $resourcePath in jar — falling back")
+      return false
+    }
+    try {
+      val dotIdx = name.lastIndexOf('.')
+      val (prefix, suffix) =
+        if (dotIdx > 0) (name.substring(0, dotIdx), name.substring(dotIdx))
+        else            (name, "")
+      val tmp = java.io.File.createTempFile(prefix, suffix)
+      tmp.deleteOnExit()
+      java.nio.file.Files.copy(
+        in, tmp.toPath,
+        java.nio.file.StandardCopyOption.REPLACE_EXISTING
+      )
+      System.load(tmp.getAbsolutePath)
+      System.err.println(s"[FDComputeNative] Extracted $name → ${tmp.getAbsolutePath}")
+      System.err.println(s"[FDComputeNative] Loaded native library successfully ✓")
+      true
+    } finally in.close()
+  }
+
   /**
    * Load the native library before the first JNI call.
    *
-   * On Kubernetes executors, call with SparkFiles.getRootDirectory() + "/libFDCompute.so".
-   * Falls back to System.loadLibrary (java.library.path) for local dev.
+   * Resolution order:
+   *   1. Bundled jar resource  /native/libFDCompute.{so,dylib}
+   *   2. Explicit libPath caller passed in (e.g. SparkFiles.getRootDirectory()/libFDCompute.so)
+   *   3. System.loadLibrary("FDCompute")  — uses java.library.path / LD_LIBRARY_PATH
    */
   def ensureLoaded(libPath: String): Unit = {
     if (!loaded) synchronized {
       if (!loaded) {
-        val f = new java.io.File(libPath)
-        if (f.exists()) System.load(f.getAbsolutePath)
-        else            System.loadLibrary("FDCompute")
-        loaded = true
+        if (loadFromJar()) {
+          loaded = true
+        } else {
+          val f = new java.io.File(libPath)
+          if (f.exists()) System.load(f.getAbsolutePath)
+          else            System.loadLibrary("FDCompute")
+          loaded = true
+        }
       }
     }
   }

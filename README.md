@@ -67,12 +67,17 @@ fd-compute-spark/
 ├── lib/                       ← Native library (output of compile_native.sh)
 │   ├── libFDCompute.so        ← Linux — used on Spark cluster
 │   └── libFDCompute.dylib     ← macOS — used for local testing
+│                              (sbt package bundles these into the jar
+│                               under  native/  for runtime extraction)
 └── src/main/scala/com/fd/compute/
     ├── StackDistancePipelineJob.scala   ← Production job (map + reduce in one)
-    ├── FDComputeNative.scala            ← JNI interface declarations
+    ├── FDComputeNative.scala            ← JNI interface + jar-resource loader
     ├── StackDistanceMapJob.scala        ← Debug: map phase only
     └── StackDistanceReduceJob.scala     ← Debug: reduce phase only
 ```
+
+> **Build/scaffold files (also in the repo):**
+> `project/plugins.sbt` (sbt-assembly), `project/build.properties` (sbt version).
 
 > `StackDistanceMapJob` and `StackDistanceReduceJob` are **not used in production**.
 > The pipeline job does everything. They exist for debugging each phase in isolation.
@@ -83,14 +88,19 @@ fd-compute-spark/
 
 | File | Portable? | Notes |
 |---|---|---|
-| `target/scala-2.13/fd-compute-spark_2.13-0.1.jar` | ✅ Any JVM | Pure Scala bytecode |
-| `lib/libFDCompute.so` | ❌ Platform-specific | Must be **recompiled** on target Linux |
-| `lib/libFDCompute.dylib` | ❌ macOS arm64 only | For local Mac testing only |
+| `target/scala-2.12/fd-compute-spark_2.12-0.1.jar` | ⚠️ Bundles native lib for **the platform it was packaged on** | Pure Scala bytecode + the `.so`/`.dylib` produced by `compile_native.sh`, embedded as resources under `native/` |
 | `run_pipeline_job.sh` | ✅ | Shell script, no changes needed |
 | `conf/encryption_keys.json` | ✅ | Keep secret — contains AES keys |
 
-**The `.so` / `.dylib` MUST be compiled on the machine/OS where Spark will run.**
-A macOS `.dylib` will not load on a Linux cluster.
+> **The native library is bundled inside the jar.**
+> At runtime, `FDComputeNative.ensureLoaded()` extracts `native/libFDCompute.{so,dylib}`
+> from the jar to a temp file and calls `System.load()`. No `LD_LIBRARY_PATH` /
+> `java.library.path` setup needed on the receiving cluster.
+>
+> ⚠️ The jar is platform-specific because the bundled `.so`/`.dylib` is.
+> Re-run `./compile_native.sh && sbt package` on the target OS/arch (typically
+> Linux x86_64) before distributing to the cluster. A macOS-built jar will
+> fail with `dlopen` errors on Linux.
 
 ---
 
@@ -126,10 +136,22 @@ Output: `lib/libFDCompute.so` (Linux) or `lib/libFDCompute.dylib` (macOS).
 ```bash
 cd fd-compute-spark
 sbt package
-# → target/scala-2.13/fd-compute-spark_2.13-0.1.jar
+# → target/scala-2.12/fd-compute-spark_2.12-0.1.jar
 ```
 
-The jar is pre-built and included if distributed. Only needed if you modify the Scala code.
+`sbt package` automatically copies whichever of `lib/libFDCompute.{so,dylib}`
+exist into the jar under `native/`. You can verify with:
+
+```bash
+unzip -l target/scala-2.12/fd-compute-spark_2.12-0.1.jar | grep native/
+#   native/libFDCompute.so      174752  ...
+#   native/libFDCompute.dylib   159712  ...   (only on macOS dev boxes)
+```
+
+> Always run `compile_native.sh` first. If `lib/` is empty when `sbt package`
+> runs, the resulting jar will not contain a native lib and the runtime loader
+> will fall back to `LD_LIBRARY_PATH` / `java.library.path` (which most deploys
+> won't have set).
 
 ---
 
