@@ -167,26 +167,27 @@ object StackDistancePipelineJob {
     if (args.length < 5) {
       System.err.println(
         "Usage: StackDistancePipelineJob " +
-        "<s3Bucket> <s3Prefix> <encryptionKeysFile> <numMappers> <numReducers>"
+        "<s3Bucket> <s3Prefix> <inputEncryptionKeysFile> <numMappers> <numReducers> " +
+        "[s3OutputPrefix] [outputBucket] [outputEncryptionKeysFile]"
       )
       System.exit(1)
     }
 
-    val s3Bucket           = args(0)
-    val s3Prefix           = args(1).stripSuffix("/")
-    val encryptionKeysFile = args(2)
-    val numMappers         = args(3).toInt
-    val numReducers        = args(4).toInt
-    val s3OutputPrefix     = if (args.length > 5) args(5).stripSuffix("/") else "fd_output"
-    // args(6): output bucket — if omitted or empty, defaults to s3Bucket (input bucket)
-    val outputBucket       = if (args.length > 6 && args(6).nonEmpty) args(6) else s3Bucket
+    val s3Bucket                 = args(0)
+    val s3Prefix                 = args(1).stripSuffix("/")
+    val encryptionKeysFile       = args(2)
+    val numMappers               = args(3).toInt
+    val numReducers              = args(4).toInt
+    val s3OutputPrefix           = if (args.length > 5) args(5).stripSuffix("/") else "fd_output"
+    val outputBucket             = if (args.length > 6 && args(6).nonEmpty) args(6) else s3Bucket
+    val outputEncryptionKeysFile = if (args.length > 7) args(7) else ""
 
     val conf = new SparkConf().setAppName("StackDistancePipelineJob")
     if (!conf.contains("spark.master")) conf.setMaster("local[1]")
 
     val sc = new SparkContext(conf)
     try {
-      run(sc, s3Bucket, s3Prefix, encryptionKeysFile, numMappers, numReducers, s3OutputPrefix, outputBucket)
+      run(sc, s3Bucket, s3Prefix, encryptionKeysFile, numMappers, numReducers, s3OutputPrefix, outputBucket, outputEncryptionKeysFile)
       println(s"Pipeline complete. stdtime files uploaded to s3://$outputBucket/$s3OutputPrefix/")
     } finally {
       sc.stop()
@@ -198,14 +199,15 @@ object StackDistancePipelineJob {
   // -------------------------------------------------------------------------
 
   def run(
-    sc:                 SparkContext,
-    s3Bucket:           String,
-    s3Prefix:           String,
-    encryptionKeysFile: String,
-    numMappers:         Int,
-    numReducers:        Int,
-    s3OutputPrefix:     String = "fd_output",
-    outputBucket:       String = ""   // if empty, defaults to s3Bucket
+    sc:                        SparkContext,
+    s3Bucket:                  String,
+    s3Prefix:                  String,
+    encryptionKeysFile:        String,
+    numMappers:                Int,
+    numReducers:               Int,
+    s3OutputPrefix:            String = "fd_output",
+    outputBucket:              String = "",   // if empty, defaults to s3Bucket
+    outputEncryptionKeysFile:  String = ""    // if empty, falls back to input keys
   ): Unit = {
 
     val resolvedOutputBucket = if (outputBucket.nonEmpty) outputBucket else s3Bucket
@@ -222,7 +224,19 @@ object StackDistancePipelineJob {
 
     // Load encryption keys on the driver (local file, not S3)
     val encryptionKeys: Map[String, String] = loadEncryptionKeys(encryptionKeysFile)
-    println(s"Loaded ${encryptionKeys.size} encryption key(s) from $encryptionKeysFile")
+    println(s"Loaded ${encryptionKeys.size} input encryption key(s) from $encryptionKeysFile")
+
+    // Load output encryption keys — separate JSON, latest index used for upload.
+    // Falls back to input keys if no output keys file is provided.
+    val outputEncryptionKeys: Map[String, String] =
+      if (outputEncryptionKeysFile.nonEmpty) {
+        val m = loadEncryptionKeys(outputEncryptionKeysFile)
+        println(s"Loaded ${m.size} output encryption key(s) from $outputEncryptionKeysFile")
+        m
+      } else {
+        println("No output encryption keys file provided — falling back to input keys for upload")
+        encryptionKeys
+      }
 
     // List all files — listing never needs SSE-C headers
     val listConf  = s3aConf(accessKey, secretKey, encryptionKeys("1"), withSseC = false)
@@ -251,9 +265,10 @@ object StackDistancePipelineJob {
     allFiles.foreach(f => println(s"  $f"))
 
     // Broadcast credentials and keys so executors can access S3
-    val bcAccessKey       = sc.broadcast(accessKey)
-    val bcSecretKey       = sc.broadcast(secretKey)
-    val bcEncryptionKeys  = sc.broadcast(encryptionKeys)
+    val bcAccessKey             = sc.broadcast(accessKey)
+    val bcSecretKey             = sc.broadcast(secretKey)
+    val bcEncryptionKeys        = sc.broadcast(encryptionKeys)
+    val bcOutputEncryptionKeys  = sc.broadcast(outputEncryptionKeys)
     // Broadcast output-specific values so executors can upload stdtime.* directly
     val bcOutputAccessKey = sc.broadcast(outputAccessKey)
     val bcOutputSecretKey = sc.broadcast(outputSecretKey)
@@ -269,6 +284,10 @@ object StackDistancePipelineJob {
         val ak   = bcAccessKey.value
         val sk   = bcSecretKey.value
         val keys = bcEncryptionKeys.value
+
+        // S3_INPUT_SSE_C_KEY env var is no longer needed — input keys are loaded
+        // from the mounted input encryption-keys JSON (args(2)) and keyed by
+        // the index embedded in each input file path.
 
         fileIter.flatMap { s3Path =>
           val keyIdx = keyIndexOf(s3Path)
@@ -407,11 +426,12 @@ object StackDistancePipelineJob {
 
       try {
         val native    = FDComputeNative
-        val ak        = bcOutputAccessKey.value
-        val sk        = bcOutputSecretKey.value
-        val encKeys   = bcEncryptionKeys.value
-        val outBucket = bcOutputBucket.value
-        val outPrefix = bcS3OutputPrefix.value
+        val ak          = bcOutputAccessKey.value
+        val sk          = bcOutputSecretKey.value
+        val encKeys     = bcEncryptionKeys.value
+        val outEncKeys  = bcOutputEncryptionKeys.value
+        val outBucket   = bcOutputBucket.value
+        val outPrefix   = bcS3OutputPrefix.value
 
         log(s"hostname=${java.net.InetAddress.getLocalHost.getHostName}")
         log(s"outBucket=$outBucket  outPrefix=$outPrefix")
@@ -496,17 +516,10 @@ object StackDistancePipelineJob {
         if (outputFiles.isEmpty) {
           log(s"WARNING: No stdtime.* files found in $localOutputDir — nothing to upload")
         } else {
-          // If S3_OUTPUT_SSE_C_KEY is set (dedicated output bucket key injected via
-          // spark.kubernetes.executor.secretKeyRef), use it; otherwise fall back to
-          // the highest-indexed key from the input encryption-keys.json.
-          val (uploadSseCKey, uploadKeyLabel) = sys.env.get("S3_OUTPUT_SSE_C_KEY") match {
-            case Some(k) => (k, "S3_OUTPUT_SSE_C_KEY")
-            case None    =>
-              val idx = encKeys.keys.map(_.toInt).max.toString
-              log(s"S3_OUTPUT_SSE_C_KEY not set — falling back to input key index=$idx")
-              (encKeys(idx), s"input-key-$idx")
-          }
-          log(s"Using SSE-C key source=$uploadKeyLabel for upload")
+          // Use the highest-indexed key from the dedicated output encryption keys JSON.
+          val outKeyIdx    = outEncKeys.keys.map(_.toInt).max.toString
+          val uploadSseCKey = outEncKeys(outKeyIdx)
+          log(s"Using output encryption key index=$outKeyIdx for upload")
 
           val uploadConf = s3aConf(ak, sk, uploadSseCKey)
           log(s"Creating S3 FileSystem for s3a://$outBucket ...")
@@ -514,7 +527,7 @@ object StackDistancePipelineJob {
           log("S3 FileSystem created OK")
 
           outputFiles.foreach { f =>
-            val s3FileName = s"${f.getName}.key$uploadKeyLabel"
+            val s3FileName = s"${f.getName}.key$outKeyIdx"
             val dest       = new Path(s"s3a://$outBucket/$outPrefix/$s3FileName")
             log(s"Uploading ${f.getName} (${f.length} bytes) → $dest")
             val localIn = new java.io.FileInputStream(f)
