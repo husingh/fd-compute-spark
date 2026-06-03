@@ -1,0 +1,29 @@
+# Build output
+target/
+project/target/
+project/project/target/
+
+# SBT
+.bsp/
+.metals/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# macOS
+.DS_Store
+
+# Kubernetes cluster credentials — NEVER commit
+kubeconfig.yaml
+
+# Logs
+*.log
+pipeline-driver.log
+
+# Local JARs
+*.jar
+
+# Native binaries (checked in via LFS or distributed separately)
+# lib/libFDCompute.so   ← uncomment to exclude binary

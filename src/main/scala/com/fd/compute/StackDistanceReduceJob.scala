@@ -85,12 +85,8 @@ object StackDistanceReduceJob {
 
     // Ordering for the composite key: sort by serialKey first, then timestamp.
     // Declared as def to avoid Scala's forward-reference restriction on implicit vals.
-    implicit def pairOrdering: Ordering[(String, Double)] = new Ordering[(String, Double)] {
-      def compare(a: (String, Double), b: (String, Double)): Int = {
-        val c = a._1.compareTo(b._1)
-        if (c != 0) c else java.lang.Double.compare(a._2, b._2)
-      }
-    }
+    implicit val pairOrdering: Ordering[(String, Double)] =
+      Ordering.Tuple2(Ordering.String, Ordering.Double)
 
     val sorted = compositeRDD.repartitionAndSortWithinPartitions(partitioner)
 

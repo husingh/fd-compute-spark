@@ -14,7 +14,7 @@ import java.util.Base64
 
 import scala.io.Source
 import scala.collection.mutable
-import scala.jdk.CollectionConverters._
+import scala.collection.JavaConverters._
 
 /**
  * End-to-end stack_distance pipeline: map + reduce in a single Spark job.
@@ -88,91 +88,31 @@ object StackDistancePipelineJob {
     m.map(_.group(1)).getOrElse("1")
   }
 
-  // All FD_MAPREDUCE_*_FILE env vars that point to INPUT files the C++ code
-  // reads via fopen().  (FD_MAPREDUCE_WRITE_SERIAL_INFO_FILE is an output path
-  // written by C++, not a download target.)
-  val S3_FILE_ENV_VARS: Seq[String] = Seq(
-    "FD_MAPREDUCE_VCDS_FILE",
-    "FD_MAPREDUCE_CPCODES_FILE",
-    "FD_MAPREDUCE_REGIONS_FILE",
-    "FD_MAPREDUCE_GHOSTIP_FILE",
-    "FD_MAPREDUCE_CPCODE_MAP_FILE",
-    "FD_MAPREDUCE_VCD_MAP_NETWORK_FILE",
-    "FD_MAPREDUCE_ARL_VCD_TRANSLATION_FILE"
-  )
 
-  /**
-   * For each FD_MAPREDUCE_*_FILE env var whose value starts with s3:// or s3a://,
-   * download the file to a task-local temp directory and return a newline-separated
-   * string of "KEY=/local/path" pairs to pass to mapperInit / reducerInit.
-   *
-   * Vars that are not set, or that already point to local paths, are skipped —
-   * C++ will handle them as-is via getenv().
-   *
-   * @param accessKey      S3 access key
-   * @param secretKey      S3 secret key
-   * @param encryptionKeys Map of key index → base64 SSE-C key
-   * @param taskTempDir    Directory to download files into (must already exist)
-   */
-  def downloadS3ConfigFiles(
-    accessKey:      String,
-    secretKey:      String,
-    encryptionKeys: Map[String, String],
-    taskTempDir:    java.io.File
-  ): String = {
-    val overrides = scala.collection.mutable.ArrayBuffer[String]()
-    for (varName <- S3_FILE_ENV_VARS) {
-      sys.env.get(varName) match {
-        case Some(v) if v.startsWith("s3://") || v.startsWith("s3a://") =>
-          val s3Path    = if (v.startsWith("s3://")) "s3a://" + v.stripPrefix("s3://") else v
-          val keyIdx    = keyIndexOf(s3Path)
-          val sseKey    = encryptionKeys.getOrElse(keyIdx,
-            throw new IllegalArgumentException(
-              s"No encryption key for index '$keyIdx' needed by $varName=$v"))
-          val fileName  = s3Path.split("/").last.replaceAll("""\.key\d+$""", "")
-          val localFile = new java.io.File(taskTempDir, fileName)
-          println(s"[S3 config] Downloading $varName from $s3Path → ${localFile.getAbsolutePath}")
-          val conf = s3aConf(accessKey, secretKey, sseKey)
-          val path = new org.apache.hadoop.fs.Path(s3Path)
-          val fs   = org.apache.hadoop.fs.FileSystem.get(path.toUri, conf)
-          val in   = fs.open(path)
-          val out  = new java.io.FileOutputStream(localFile)
-          try {
-            val buf = new Array[Byte](64 * 1024)
-            var n = in.read(buf)
-            while (n > 0) { out.write(buf, 0, n); n = in.read(buf) }
-          } finally { in.close(); out.close(); fs.close() }
-          println(s"[S3 config]   → ${localFile.length()} bytes")
-          overrides += s"$varName=${localFile.getAbsolutePath}"
-        case Some(_) =>
-          // Already a local path — C++ opens it directly, nothing to do
-        case None =>
-          // Not set — C++ will just skip it
-      }
-    }
-    overrides.mkString("\n")
-  }
 
   /**
    * Build a Hadoop Configuration for S3A with SSE-C decryption.
    * Called on executors (serializable pieces only — String args).
    */
-  def s3aConf(accessKey: String, secretKey: String, sseKeyB64: String): Configuration = {
+  def s3aConf(accessKey: String, secretKey: String, sseKeyB64: String,
+              withSseC: Boolean = true): Configuration = {
     val conf = new Configuration(false)
-    conf.set("fs.s3a.impl",                               "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    conf.set("fs.s3a.endpoint",                           s3Endpoint)
-    conf.set("fs.s3a.path.style.access",                  "true")
-    conf.set("fs.s3a.connection.ssl.enabled",             "true")
-    conf.set("fs.s3a.access.key",                         accessKey)
-    conf.set("fs.s3a.secret.key",                         secretKey)
-    conf.set("fs.s3a.server-side-encryption-algorithm",   "SSE-C")
-    conf.set("fs.s3a.server-side-encryption.key",         sseKeyB64)
-    // Required by the SSE-C protocol: MD5 of the raw key bytes
-    val keyBytes = Base64.getDecoder.decode(sseKeyB64)
-    val md5B64   = Base64.getEncoder.encodeToString(
-                     MessageDigest.getInstance("MD5").digest(keyBytes))
-    conf.set("fs.s3a.server-side-encryption-key-md5", md5B64)
-    // Required by S3A internally even when no local staging is used
+    conf.set("fs.s3a.impl",                "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    conf.set("fs.s3a.endpoint",            s3Endpoint)
+    conf.set("fs.s3a.path.style.access",   "true")
+    conf.set("fs.s3a.connection.ssl.enabled", "true")
+    conf.set("fs.s3a.signing-algorithm",   "S3SignerType")   // Linode requires v2 signing
+    conf.set("fs.s3a.checksum.validation", "false")          // Linode rejects AWS v4 checksum header
+    conf.set("fs.s3a.access.key",          accessKey)
+    conf.set("fs.s3a.secret.key",          secretKey)
+    if (withSseC) {
+      conf.set("fs.s3a.server-side-encryption-algorithm", "SSE-C")
+      conf.set("fs.s3a.server-side-encryption.key",       sseKeyB64)
+      val keyBytes = Base64.getDecoder.decode(sseKeyB64)
+      val md5B64   = Base64.getEncoder.encodeToString(
+                       MessageDigest.getInstance("MD5").digest(keyBytes))
+      conf.set("fs.s3a.server-side-encryption-key-md5", md5B64)
+    }
     conf.set("hadoop.tmp.dir", System.getProperty("java.io.tmpdir", "/tmp"))
     conf
   }
@@ -238,14 +178,16 @@ object StackDistancePipelineJob {
     val numMappers         = args(3).toInt
     val numReducers        = args(4).toInt
     val s3OutputPrefix     = if (args.length > 5) args(5).stripSuffix("/") else "fd_output"
+    // args(6): output bucket — if omitted or empty, defaults to s3Bucket (input bucket)
+    val outputBucket       = if (args.length > 6 && args(6).nonEmpty) args(6) else s3Bucket
 
     val conf = new SparkConf().setAppName("StackDistancePipelineJob")
     if (!conf.contains("spark.master")) conf.setMaster("local[1]")
 
     val sc = new SparkContext(conf)
     try {
-      run(sc, s3Bucket, s3Prefix, encryptionKeysFile, numMappers, numReducers, s3OutputPrefix)
-      println(s"Pipeline complete. stdtime files uploaded to s3://$s3Bucket/$s3OutputPrefix/")
+      run(sc, s3Bucket, s3Prefix, encryptionKeysFile, numMappers, numReducers, s3OutputPrefix, outputBucket)
+      println(s"Pipeline complete. stdtime files uploaded to s3://$outputBucket/$s3OutputPrefix/")
     } finally {
       sc.stop()
     }
@@ -262,29 +204,61 @@ object StackDistancePipelineJob {
     encryptionKeysFile: String,
     numMappers:         Int,
     numReducers:        Int,
-    s3OutputPrefix:     String = "fd_output"
+    s3OutputPrefix:     String = "fd_output",
+    outputBucket:       String = ""   // if empty, defaults to s3Bucket
   ): Unit = {
+
+    val resolvedOutputBucket = if (outputBucket.nonEmpty) outputBucket else s3Bucket
 
     // Read credentials from env vars (set via spark.executorEnv.* in run script)
     val accessKey = sys.env.getOrElse("S3_ACCESS_KEY",
       throw new IllegalStateException("S3_ACCESS_KEY env var not set"))
     val secretKey = sys.env.getOrElse("S3_SECRET_KEY",
       throw new IllegalStateException("S3_SECRET_KEY env var not set"))
+    // S3_OUTPUT_ACCESS_KEY / S3_OUTPUT_SECRET_KEY: separate output bucket creds.
+    // Fall back to input creds when writing to the same bucket.
+    val outputAccessKey = sys.env.getOrElse("S3_OUTPUT_ACCESS_KEY", accessKey)
+    val outputSecretKey = sys.env.getOrElse("S3_OUTPUT_SECRET_KEY", secretKey)
 
     // Load encryption keys on the driver (local file, not S3)
     val encryptionKeys: Map[String, String] = loadEncryptionKeys(encryptionKeysFile)
     println(s"Loaded ${encryptionKeys.size} encryption key(s) from $encryptionKeysFile")
 
-    // List all files — use key "1" (no data read, listing never needs SSE-C key)
-    val listConf  = s3aConf(accessKey, secretKey, encryptionKeys("1"))
-    val allFiles  = listS3Files(s3Bucket, s3Prefix, listConf)
-    println(s"Found ${allFiles.size} file(s) under s3://$s3Bucket/$s3Prefix")
+    // List all files — listing never needs SSE-C headers
+    val listConf  = s3aConf(accessKey, secretKey, encryptionKeys("1"), withSseC = false)
+    val rawFiles  = listS3Files(s3Bucket, s3Prefix, listConf)
+    println(s"Found ${rawFiles.size} file(s) under s3://$s3Bucket/$s3Prefix")
+
+    // Optional date-range + file.pattern filter (replaces legacy customFilter.jar).
+    // Enabled via sparkConf 'fd.computation.enableFiltering=true' plus
+    // 'fd.computation.date.start', 'fd.computation.date.end', 'file.pattern'.
+    val filterOpt = FdInputFileFilter.fromSparkConf(
+      sc.getConf,
+      basePath = s"s3a://$s3Bucket/$s3Prefix/"
+    )
+    val allFiles: Seq[String] = filterOpt match {
+      case Some(f) =>
+        println(s"Applying input filter: $f")
+        val kept = rawFiles.filter(f.accept)
+        println(s"After filter: ${kept.size} of ${rawFiles.size} file(s) kept " +
+          s"(dates ${f.startDate}..${f.endDate}, " +
+          s"${f.arlSet.size} arl id(s), ${f.comboSet.size} arl:metro combo(s))")
+        kept
+      case None =>
+        println("Input filter disabled (fd.computation.enableFiltering!=true) — using all files")
+        rawFiles
+    }
     allFiles.foreach(f => println(s"  $f"))
 
     // Broadcast credentials and keys so executors can access S3
-    val bcAccessKey      = sc.broadcast(accessKey)
-    val bcSecretKey      = sc.broadcast(secretKey)
-    val bcEncryptionKeys = sc.broadcast(encryptionKeys)
+    val bcAccessKey       = sc.broadcast(accessKey)
+    val bcSecretKey       = sc.broadcast(secretKey)
+    val bcEncryptionKeys  = sc.broadcast(encryptionKeys)
+    // Broadcast output-specific values so executors can upload stdtime.* directly
+    val bcOutputAccessKey = sc.broadcast(outputAccessKey)
+    val bcOutputSecretKey = sc.broadcast(outputSecretKey)
+    val bcOutputBucket    = sc.broadcast(resolvedOutputBucket)
+    val bcS3OutputPrefix  = sc.broadcast(s3OutputPrefix)
 
     // -----------------------------------------------------------------------
     // Stage 1a: Parallelize file list → each task reads one S3 file
@@ -318,15 +292,9 @@ object StackDistancePipelineJob {
         val sk   = bcSecretKey.value
         val keys = bcEncryptionKeys.value
 
-        // Download any FD_MAPREDUCE_*_FILE env vars that point to S3
-        val taskId      = java.util.UUID.randomUUID().toString
-        val cfgTempDir  = new java.io.File(s"/tmp/fd_cfg_$taskId")
-        cfgTempDir.mkdirs()
-        val envOverrides = downloadS3ConfigFiles(ak, sk, keys, cfgTempDir)
-        if (envOverrides.nonEmpty)
-          println(s"[mapper] Env overrides for C++ readConfig:\n${envOverrides.linesIterator.map("  " + _).mkString("\n")}")
-
-        val handle = FDComputeNative.mapperInit("", envOverrides)
+        val libPath = s"${org.apache.spark.SparkFiles.getRootDirectory()}/libFDCompute.so"
+        FDComputeNative.ensureLoaded(libPath)
+        val handle = FDComputeNative.mapperInit("", "")
 
         val outputLines = iter
           .grouped(mapperBatchSize)
@@ -360,13 +328,19 @@ object StackDistancePipelineJob {
       println(s"[DEBUG] Reducer will NOT run. Re-run without FD_DEBUG_DUMP to do a full run.")
       mapOutput.saveAsTextFile(s"$debugDir/map_output")
 
-      // Print a summary: line count, unique serial keys, sample lines
+      // Print a summary: line count, unique serial keys, unique md5s, sample lines
       val sample    = mapOutput.take(20)
       val lineCount = mapOutput.count()
       val uniqKeys  = mapOutput.map(_.takeWhile(_ != ':')).distinct().count()
+      // Extract md5 = 3rd field (index 2) split by ':'
+      val uniqMd5s  = mapOutput.map { line =>
+        val fields = line.split(":", 4)
+        if (fields.length >= 3) fields(2) else ""
+      }.distinct().count()
       println(s"\n[DEBUG] ===== Mapper Output Summary =====")
       println(s"[DEBUG] Total output lines : $lineCount")
       println(s"[DEBUG] Unique serial keys : $uniqKeys")
+      println(s"[DEBUG] Unique md5 hashes  : $uniqMd5s")
       println(s"[DEBUG] Format: serial:timestamp:md5:size:bytes:cpcode[:trueSerial:max_age]")
       println(s"[DEBUG] First 20 lines:")
       sample.foreach(l => println(s"[DEBUG]   $l"))
@@ -387,13 +361,8 @@ object StackDistancePipelineJob {
       ((key, ts), line)
     }
 
-    implicit def pairOrdering: Ordering[(String, Double)] =
-      new Ordering[(String, Double)] {
-        def compare(a: (String, Double), b: (String, Double)): Int = {
-          val c = a._1.compareTo(b._1)
-          if (c != 0) c else java.lang.Double.compare(a._2, b._2)
-        }
-      }
+    implicit val pairOrdering: Ordering[(String, Double)] =
+      Ordering.Tuple2(Ordering.String, Ordering.Double)
 
     val sorted = keyed.repartitionAndSortWithinPartitions(
       new SerialKeyPartitioner(numReducers)
@@ -425,65 +394,155 @@ object StackDistancePipelineJob {
     }
 
     // -----------------------------------------------------------------------
-    // Stage 3: Reduce — C++ reducer, one instance per Spark partition
+    // Stage 3: Reduce — C++ reducer, one instance per Spark partition.
     // Lines arrive sorted by (serialKey, timestamp) — exactly as Hadoop did.
+    // Uses mapPartitions + collect so ALL executor-side logs return to the
+    // driver (executor pod logs vanish on completion; driver log is permanent).
     // -----------------------------------------------------------------------
-    sorted.foreachPartition { iter =>
+    val partitionLogs: Array[String] = sorted.mapPartitions { iter =>
       val partitionId = TaskContext.get().partitionId()
-      val native      = FDComputeNative
-      val ak          = bcAccessKey.value
-      val sk          = bcSecretKey.value
-      val keys        = bcEncryptionKeys.value
+      val msgs = scala.collection.mutable.ArrayBuffer[String]()
 
-      // Download any FD_MAPREDUCE_*_FILE env vars that point to S3
-      val taskId      = java.util.UUID.randomUUID().toString
-      val cfgTempDir  = new java.io.File(s"/tmp/fd_cfg_reduce_$taskId")
-      cfgTempDir.mkdirs()
-      val envOverrides = downloadS3ConfigFiles(ak, sk, keys, cfgTempDir)
-      if (envOverrides.nonEmpty)
-        println(s"[reducer p$partitionId] Env overrides for C++ readConfig:\n${envOverrides.linesIterator.map("  " + _).mkString("\n")}")
+      def log(msg: String): Unit = msgs += s"[P$partitionId] $msg"
 
-      native.reducerInit(partitionId, numReducers, envOverrides)
+      try {
+        val native    = FDComputeNative
+        val ak        = bcOutputAccessKey.value
+        val sk        = bcOutputSecretKey.value
+        val encKeys   = bcEncryptionKeys.value
+        val outBucket = bcOutputBucket.value
+        val outPrefix = bcS3OutputPrefix.value
 
-      iter
-        .map(_._2)
-        .grouped(reducerBatchSize)
-        .foreach { batch =>
+        log(s"hostname=${java.net.InetAddress.getLocalHost.getHostName}")
+        log(s"outBucket=$outBucket  outPrefix=$outPrefix")
+
+        val libPath = s"${org.apache.spark.SparkFiles.getRootDirectory()}/libFDCompute.so"
+        log(s"Loading native lib from: $libPath  exists=${new java.io.File(libPath).exists()}")
+        native.ensureLoaded(libPath)
+        log("ensureLoaded OK")
+
+        // Scope the output dir to this Spark application's run id so concurrent
+        // pipelines can never collide on the same path. FD_JOB_RUN_ID is injected
+        // by the YAML (driver + executor env). Falls back to Spark applicationId
+        // (available on driver+executor) if not set.
+        val jobRunId = sys.env.getOrElse(
+          "FD_JOB_RUN_ID",
+          Option(org.apache.spark.SparkEnv.get).map(_.conf.getAppId).getOrElse("local")
+        )
+        val localOutputDir = s"/tmp/fd_compute/$jobRunId"
+        val localDir = new java.io.File(localOutputDir)
+        localDir.mkdirs()
+        log(s"jobRunId=$jobRunId  localOutputDir=$localOutputDir  exists=${localDir.exists()}  cwd=${new java.io.File(".").getAbsolutePath}")
+
+        log(s"reducerInit(partitionId=$partitionId, numReducers=$numReducers)")
+        // Forward all FD_MAPREDUCE_* env vars to C++ via JNI envOverrides, and
+        // explicitly set FD_MAPREDUCE_OUTPUT_DIR so C++ writes stdtime.* to the
+        // same directory Scala will scan for uploads.
+        val fdEnvOverrides = sys.env
+          .filter { case (k, _) => k.startsWith("FD_MAPREDUCE_") }
+          .map    { case (k, v) => s"$k=$v" }
+          .toSeq
+        val envOverridesStr = (fdEnvOverrides :+ s"FD_MAPREDUCE_OUTPUT_DIR=$localOutputDir").mkString("\n")
+        log(s"envOverrides: ${envOverridesStr.replace("\n", " | ")}")
+        native.reducerInit(partitionId, numReducers, envOverridesStr)
+        log("reducerInit OK")
+
+        var batchCount = 0
+        var lineCount  = 0
+        iter.map(_._2).grouped(reducerBatchSize).foreach { batch =>
+          batchCount += 1
+          lineCount  += batch.size
           native.reducerProcessBatch(batch.mkString("\n"))
         }
+        log(s"reducerProcessBatch done: $batchCount batches, $lineCount lines total")
 
-      native.reducerFinalize()
-    }
+        native.reducerFinalize()
+        log("reducerFinalize OK")
 
-    // -----------------------------------------------------------------------
-    // Stage 4: Upload local stdtime.* output files to S3
-    // -----------------------------------------------------------------------
-    val localOutputDir = sys.env.getOrElse("FD_MAPREDUCE_OUTPUT_DIR", "/tmp/fd_output")
-    val uploadConf     = s3aConf(accessKey, secretKey, encryptionKeys("1"))
-    val s3Fs           = FileSystem.get(new java.net.URI(s"s3a://$s3Bucket"), uploadConf)
+        // ── Inspect output directory ─────────────────────────────────────
+        log(s"FD_MAPREDUCE_OUTPUT_DIR=$localOutputDir  FD_MAPREDUCE_HDFS_ODIR=${sys.env.getOrElse("FD_MAPREDUCE_HDFS_ODIR","<not set>")}")
+        log(s"dir exists=${localDir.exists()}  isDirectory=${localDir.isDirectory}  abs=${localDir.getAbsolutePath}")
 
-    val localDir = new java.io.File(localOutputDir)
-    val outputFiles = Option(localDir.listFiles()).getOrElse(Array.empty)
-      .filter(f => f.isFile && f.getName.startsWith("stdtime"))
+        val allFiles = Option(localDir.listFiles()).getOrElse(Array.empty)
+        log(s"Total files in dir: ${allFiles.length}")
+        allFiles.foreach { f => log(s"  file: ${f.getName}  size=${f.length}  isFile=${f.isFile}") }
 
-    if (outputFiles.isEmpty) {
-      println(s"WARNING: No stdtime.* files found in $localOutputDir to upload.")
-    } else {
-      outputFiles.foreach { f =>
-        val dest = new Path(s"s3a://$s3Bucket/$s3OutputPrefix/${f.getName}")
-        println(s"Uploading ${f.getName} → s3://$s3Bucket/$s3OutputPrefix/${f.getName}")
-        val localIn = new java.io.FileInputStream(f)
-        val s3Out   = s3Fs.create(dest, /*overwrite=*/true)
-        try {
-          val buf = new Array[Byte](64 * 1024)
-          var n = localIn.read(buf)
-          while (n > 0) { s3Out.write(buf, 0, n); n = localIn.read(buf) }
-        } finally {
-          localIn.close()
-          s3Out.close()
+        // Also check cwd — older C++ writes stdtime.* there if FD_MAPREDUCE_OUTPUT_DIR
+        // didn't reach getenv().
+        val cwdDir = new java.io.File(".")
+        val cwdFiles = Option(cwdDir.listFiles()).getOrElse(Array.empty)
+          .filter(f => f.isFile && f.getName.startsWith("stdtime"))
+        if (cwdFiles.nonEmpty) {
+          log(s"Found ${cwdFiles.length} stdtime file(s) in cwd ${cwdDir.getAbsolutePath} — will use these:")
+          cwdFiles.foreach(f => log(s"  cwd/${f.getName}  size=${f.length}"))
         }
+
+        // Also check /tmp for any stdtime files outside the expected dir
+        val tmpStdtime = new java.io.File("/tmp").listFiles()
+        if (tmpStdtime != null) {
+          val found = tmpStdtime.filter(f => f.isFile && f.getName.startsWith("stdtime"))
+          if (found.nonEmpty) {
+            log(s"Found ${found.length} stdtime file(s) directly in /tmp (wrong dir!):")
+            found.foreach(f => log(s"  /tmp/${f.getName}  size=${f.length}"))
+          } else {
+            log("No stdtime files found directly in /tmp either")
+          }
+        }
+
+        val outputFilesPrimary = allFiles.filter(f => f.isFile && f.getName.startsWith("stdtime"))
+        val outputFiles = if (outputFilesPrimary.nonEmpty) outputFilesPrimary else cwdFiles
+        log(s"stdtime files to upload: ${outputFiles.length} (primary=${outputFilesPrimary.length}, cwdFallback=${cwdFiles.length})")
+
+        if (outputFiles.isEmpty) {
+          log(s"WARNING: No stdtime.* files found in $localOutputDir — nothing to upload")
+        } else {
+          val latestKeyIndex = encKeys.keys.map(_.toInt).max.toString
+          val latestKey      = encKeys(latestKeyIndex)
+          log(s"Using encryption key index=$latestKeyIndex for upload")
+
+          val uploadConf = s3aConf(ak, sk, latestKey)
+          log(s"Creating S3 FileSystem for s3a://$outBucket ...")
+          val s3Fs = FileSystem.get(new java.net.URI(s"s3a://$outBucket"), uploadConf)
+          log("S3 FileSystem created OK")
+
+          outputFiles.foreach { f =>
+            val s3FileName = s"${f.getName}.key$latestKeyIndex"
+            val dest       = new Path(s"s3a://$outBucket/$outPrefix/$s3FileName")
+            log(s"Uploading ${f.getName} (${f.length} bytes) → $dest")
+            val localIn = new java.io.FileInputStream(f)
+            val s3Out   = s3Fs.create(dest, /*overwrite=*/true)
+            try {
+              val buf = new Array[Byte](64 * 1024)
+              var n = localIn.read(buf)
+              var bytesWritten = 0L
+              while (n > 0) { s3Out.write(buf, 0, n); bytesWritten += n; n = localIn.read(buf) }
+              log(s"Uploaded ${f.getName} — $bytesWritten bytes written")
+            } finally { localIn.close(); s3Out.close() }
+          }
+          log(s"All ${outputFiles.length} file(s) uploaded to s3://$outBucket/$outPrefix/")
+        }
+
+        // Clean up the per-run local dir to avoid leaving stdtime.* behind on
+        // the executor's filesystem.
+        try {
+          val deleted = Option(localDir.listFiles()).getOrElse(Array.empty).count { f =>
+            val ok = f.delete(); if (ok) log(s"cleanup: deleted ${f.getAbsolutePath}"); ok
+          }
+          if (localDir.exists() && localDir.delete()) log(s"cleanup: removed dir $localOutputDir ($deleted files)")
+        } catch { case e: Exception => log(s"cleanup warning: ${e.getMessage}") }
+
+      } catch {
+        case e: Exception =>
+          msgs += s"[P$partitionId] EXCEPTION ${e.getClass.getName}: ${e.getMessage}"
+          msgs += e.getStackTrace.take(15).map(f => s"[P$partitionId]   at $f").mkString("\n")
       }
-      println(s"Uploaded ${outputFiles.length} file(s) to s3://$s3Bucket/$s3OutputPrefix/")
-    }
+
+      msgs.iterator
+    }.collect()
+
+    println("=== Executor Partition Logs ===")
+    partitionLogs.foreach(println)
+    println("=== End Executor Logs ===")
+    println("Pipeline complete. Executors uploaded stdtime files directly to S3.")
   }
 }

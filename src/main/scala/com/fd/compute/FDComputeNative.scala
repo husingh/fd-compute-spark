@@ -81,17 +81,22 @@ class FDComputeNative {
 }
 
 object FDComputeNative extends FDComputeNative {
+  @volatile private var loaded = false
+
   /**
-   * Load the native library.
+   * Load the native library before the first JNI call.
    *
-   * Local dev (sbt run):
-   *   - Resolved from lib/ via  -Djava.library.path=<project>/lib  in build.sbt
-   *   - Copy:  cp fd_compute/libFDCompute.dylib fd-compute-spark/lib/
-   *
-   * spark-submit:
-   *   - Include the .so in --files and set -Djava.library.path=.
-   *   - e.g.  --files lib/libFDCompute.so#libFDCompute.so
-   *           --conf spark.executor.extraJavaOptions=-Djava.library.path=.
+   * On Kubernetes executors, call with SparkFiles.getRootDirectory() + "/libFDCompute.so".
+   * Falls back to System.loadLibrary (java.library.path) for local dev.
    */
-  System.loadLibrary("FDCompute")
+  def ensureLoaded(libPath: String): Unit = {
+    if (!loaded) synchronized {
+      if (!loaded) {
+        val f = new java.io.File(libPath)
+        if (f.exists()) System.load(f.getAbsolutePath)
+        else            System.loadLibrary("FDCompute")
+        loaded = true
+      }
+    }
+  }
 }

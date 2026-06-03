@@ -1,17 +1,17 @@
 name         := "fd-compute-spark"
 version      := "0.1"
-scalaVersion := "2.13.17"
+scalaVersion := "2.12.20"
 
 // Spark is "provided" on a real cluster.
 // Change to "compile" temporarily to run via `sbt run` without spark-submit.
 val sparkScope = "provided"
 
 libraryDependencies ++= Seq(
-  "org.apache.spark" %% "spark-core" % "4.1.1" % sparkScope,
-  "org.apache.spark" %% "spark-sql"  % "4.1.1" % sparkScope,
+  "org.apache.spark" %% "spark-core" % "3.5.0" % sparkScope,
+  "org.apache.spark" %% "spark-sql"  % "3.5.0" % sparkScope,
 
-  // S3A connector for Linode Object Storage (S3-compatible)
-  "org.apache.hadoop" % "hadoop-aws"          % "3.3.6",
+  // S3A connector — must match Spark 3.5.0's bundled hadoop-common (3.3.4)
+  "org.apache.hadoop" % "hadoop-aws"          % "3.3.4",
   "com.amazonaws"     % "aws-java-sdk-bundle" % "1.12.262",
 
   // Lightweight JSON parsing for encryption_keys.json
@@ -41,3 +41,16 @@ Test / javaOptions ++= Seq(
   "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
   "--add-opens=java.base/java.lang=ALL-UNNAMED"
 )
+
+// Fat JAR: bundle Scala stdlib + all deps; exclude Spark (provided by cluster)
+assembly / assemblyMergeStrategy := {
+  case PathList("META-INF", xs @ _*) => xs match {
+    case "MANIFEST.MF" :: Nil         => MergeStrategy.discard
+    case "services" :: _              => MergeStrategy.concat
+    case _                            => MergeStrategy.discard
+  }
+  case "reference.conf"              => MergeStrategy.concat
+  case _                             => MergeStrategy.first
+}
+
+assembly / assemblyJarName := "fd-compute-spark-assembly.jar"
