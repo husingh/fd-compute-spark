@@ -3,6 +3,9 @@ target/
 project/target/
 project/project/target/
 
+# Local deploy script with real credentials — NEVER commit
+deploy/run.local.sh
+
 # SBT
 .bsp/
 .metals/
