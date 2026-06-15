@@ -516,4 +516,9 @@ void mapperFinalize(MapperCtx *ctx) {
   fprintf(stderr, "Lines read %lld, invalid lines %lld, ignored lines %lld\n",
           ctx->allLinesCount, ctx->invalidLinesCount, ctx->ignoredLinesCount) ;
   delete ctx ;
+  // Reset config globals so the next mapperInit()/readConfig() starts clean.
+  // Safe when executor.cores=1 (mapper tasks are sequential on a given JVM).
+  // With cores>1, concurrent processLogLinesBatch() calls could race against
+  // this reset — in that case, config must be moved into MapperCtx instead.
+  configReset() ;
 }
