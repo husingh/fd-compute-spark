@@ -9,140 +9,95 @@
 #include <cctype>
 #include "stack_distance.config.h"
 
-//--------------------------------------------------------------------------- 
-// All the configuration parameters
-//--------------------------------------------------------------------------- 
-int network = 0 ; // 0 = FF, 1 ESSL, 2 Cloud Wrapper
-int MAX_SERIAL = MAX_FF_SERIAL ;
+//---------------------------------------------------------------------------
+// All the configuration parameters.
+// thread_local: each executor thread (Spark task) gets its own isolated copy.
+//---------------------------------------------------------------------------
+thread_local int network = 0 ; // 0 = FF, 1 ESSL, 2 Cloud Wrapper
+thread_local int MAX_SERIAL = MAX_FF_SERIAL ;
 
 //---------------------------------------------------------------------------
 // How to filter logs
 //---------------------------------------------------------------------------
-// Time based filtering
-// Consider only the lines between start and end time. Default is to consider all lines
-// Also prewarming priod length
-int start_time_config = 0;
-int end_time_config = INT_MAX;
-int prewarmPeriod = 0 ;
-bool prewarmConfigRelative = false ;
-// Map based filtering 
-// Only consider a line if its "map" is in this "map"
-char maprules[LOG_LINE_LENGTH];
-std::map<int,char *> map_names ;
-std::map<int,int> map_index ;
-std::map<int,int> mapid2m_index ;
-int num_maps = 0 ;
-// Mapid based filtering
-// Only consider a ine if its mapid is in this map
-std::map<int,int> mapids ;
-// cpcode based filtering
-// Only consider a line if its cpcode is in this map
-// Note the format of this map: cpcode -> cpcode_id, not the other way round.
-std::map<int,int> cpcodes;
-int numcpcodes = 0 ;
-bool exclude_cpcodes = false ;
-// vcd-based filtering
-// Only consider a line if its vcd is in this map
-// Note the format of this map: vcd->vcd_denseid, not the other way round
-std::map<int,int> vcds ;
-int numvcds = 0 ;
-bool exclude_vcds = false ;
-// Region-based filtering
-std::map<int,int> regions ;
-int numregions = 0 ;
-bool exclude_regions = false ;
-// ghostip based filtering
-// Only consider a log file if ghostip is in this map
-std::map<int,int> ghosts;
-// How to combine map and cpcode filters
-// If both are specified. 0 means OR and 1 means AND. Default is AND
-int filter_combine = 1 ;
-//Should we process all logs, or only cache misses
-bool processMissesOnly = false ;
-bool computeBothServedAndMiss = false ;
-// Should we ignore lines caused by ICP traffic?
-bool ignoreICP = true ;
-// Should we ignore lines caused by prefetch?
-bool ignorePrefetch = false ;
-std::map<string, bool> ignorePrefetchOverride ;
-// Should we write a serial-info file giving per-serial traffic and footprint info?
-bool writeSerialInfoFile = false ;
-// Should we randmly sample lines from the input?
-double randomSamplingPct = 100.0 ;
+thread_local int start_time_config = 0;
+thread_local int end_time_config = INT_MAX;
+thread_local int prewarmPeriod = 0 ;
+thread_local bool prewarmConfigRelative = false ;
+thread_local char maprules[LOG_LINE_LENGTH];
+thread_local std::map<int,char *> map_names ;
+thread_local std::map<int,int> map_index ;
+thread_local std::map<int,int> mapid2m_index ;
+thread_local int num_maps = 0 ;
+thread_local std::map<int,int> mapids ;
+thread_local std::map<int,int> cpcodes;
+thread_local int numcpcodes = 0 ;
+thread_local bool exclude_cpcodes = false ;
+thread_local std::map<int,int> vcds ;
+thread_local int numvcds = 0 ;
+thread_local bool exclude_vcds = false ;
+thread_local std::map<int,int> regions ;
+thread_local int numregions = 0 ;
+thread_local bool exclude_regions = false ;
+thread_local std::map<int,int> ghosts;
+thread_local int filter_combine = 1 ;
+thread_local bool processMissesOnly = false ;
+thread_local bool computeBothServedAndMiss = false ;
+thread_local bool ignoreICP = true ;
+thread_local bool ignorePrefetch = false ;
+thread_local std::map<string, bool> ignorePrefetchOverride ;
+thread_local bool writeSerialInfoFile = false ;
+thread_local double randomSamplingPct = 100.0 ;
 
-// FDS-G's splitting per vcd-map-network 
-bool splitByVcdMapNetwork = false ;
-std::map<string,int> vcdMapNetwork2id ;
-std::map<int, string> vcdMapNetworkId2Extension ;
-int numVcdMapNetwork = 0 ;
+thread_local bool splitByVcdMapNetwork = false ;
+thread_local std::map<string,int> vcdMapNetwork2id ;
+thread_local std::map<int, string> vcdMapNetworkId2Extension ;
+thread_local int numVcdMapNetwork = 0 ;
 
-// Should mapper send reducer the TTL (if available)
-bool considerTTL = false ;
-
-// Probabilistic entry barrier 
-double entryProbabilityPct = 100.0;
-
-// Does the log have region and ip in a comment line in the logs?
-bool region_ip_in_log = false ;
-
-// Am I a mapper or a reducer?
-bool isMapper = false ;
+thread_local bool considerTTL = false ;
+thread_local double entryProbabilityPct = 100.0;
+thread_local bool region_ip_in_log = false ;
+thread_local bool isMapper = false ;
 
 //---------------------------------------------------------------------------
 // How mapper should split logs
 //---------------------------------------------------------------------------
-// Split by URL bucket, cpcode, or mapid
-int url_bucket = 0 ;
-int splitByCpcodes = 0 ;
-int splitByMapid = 0 ;
-int splitByArlid = 0 ;
-int splitByAccount = 0 ;
-// Default: Split by serial
-// Any serial that's a key in the below maps should be rehashed 
-// The start and end of rehash range is given by these maps
-std::map<int,int> serial_start ;
-std::map<int,int> serial_bucket ;
-std::map<int,int> ESSLModulusExceptions ;
-int default_serial_bucket = 8;
-// If serials to be rehashed are specified, then should I skip all the unspecified serials?
-// Default is no, do all serials, but rehash only the specified ones
-// If rehash_only, then keep an index of each serial in the given list
-int rehash_only = 0 ;
-std::map<int,int> rehashSerialIndex ;
-// When rehashing, where should the rehash range start from - 2048 or 0?
-// Default is 2048
-int rehash_from_0 = 0 ;
-int rehash_range_start = MAX_SERIAL ;
-
-// If rehash_only is on, rehash_from_0 is on, and default_serial_bucket is 1, 
-// then it's possible to deduce original serial from the default serial. Should it be done?
-int deduce_serial = 0 ;
+thread_local int url_bucket = 0 ;
+thread_local int splitByCpcodes = 0 ;
+thread_local int splitByMapid = 0 ;
+thread_local int splitByArlid = 0 ;
+thread_local int splitByAccount = 0 ;
+thread_local std::map<int,int> serial_start ;
+thread_local std::map<int,int> serial_bucket ;
+thread_local std::map<int,int> ESSLModulusExceptions ;
+thread_local int default_serial_bucket = 8;
+thread_local int rehash_only = 0 ;
+thread_local std::map<int,int> rehashSerialIndex ;
+thread_local int rehash_from_0 = 0 ;
+thread_local int rehash_range_start = MAX_FF_SERIAL ;
+thread_local int deduce_serial = 0 ;
 
 // Thinning related
-double pctJump = 0.0 ;
+thread_local double pctJump = 0.0 ;
 
 // Spatial sampling related
-int attemptId = 0 ;
-int spatialSampleAttempt = -1 ;
-int spatialSampleBuckets = 1 ;
-std::map<string, std::pair<int,int> > spatialSampleBucketsOverride ;
+thread_local int attemptId = 0 ;
+thread_local int spatialSampleAttempt = -1 ;
+thread_local int spatialSampleBuckets = 1 ;
+thread_local std::map<string, std::pair<int,int> > spatialSampleBucketsOverride ;
 
-// Split by account or arilid related
-std::map<string,int> account2id ;
-std::map<int,int> cpcode2accountid ;
-int numAccounts = 0 ;
+thread_local std::map<string,int> account2id ;
+thread_local std::map<int,int> cpcode2accountid ;
+thread_local int numAccounts = 0 ;
+thread_local std::map<int,int> arlid2vcd ;
 
-// arlid-to-vcd translation
-std::map<int,int> arlid2vcd ;
-
-//--------------------------------------------------------------------------- 
+//---------------------------------------------------------------------------
 // How reducer should allocate memory and write stdtime files
-//--------------------------------------------------------------------------- 
-int nodelen ;
-char *output_dir ;   // output directory (local path)
-int partition_2 ;
-char stdtime_extension[1024] ;
-int numReducers = -1;
+//---------------------------------------------------------------------------
+thread_local int nodelen ;
+thread_local char *output_dir = nullptr ;
+thread_local int partition_2 = 0 ;
+thread_local char stdtime_extension[1024] ;
+thread_local int numReducers = -1;
 
 void splitPair (string a, char sep, int &rangeStart, int &rangeEnd) {
 
@@ -539,12 +494,9 @@ void readConfig () {
     }
   }
 
-  // Output directory
-  output_dir = strdup(".") ;
+  // Output directory — always strdup so configReset() can safely free it
   value = getenv("FD_MAPREDUCE_OUTPUT_DIR") ;
-  if (value) { 
-    output_dir = value ;
-  }
+  output_dir = strdup(value ? value : ".") ;
 
   // Thinning jump percentage
   value = getenv("FD_MAPREDUCE_THINNING_PCT_JUMP") ;
@@ -1298,6 +1250,89 @@ bool getIgnorePrefetch (char *m, char *n) {
     return ignorePrefetchOverride[k] ;
   }
   return ignorePrefetch ;
+}
+
+// ---------------------------------------------------------------------------
+// configReset — restore every config global to its initial value.
+// Must be called between reducer invocations (end of reducerFinalize) so
+// that readConfig() starts from a clean slate for the next partition.
+// ---------------------------------------------------------------------------
+void configReset() {
+  // Free strdup'd char* values in map_names before clearing the map
+  for (auto &kv : map_names) free(kv.second) ;
+  map_names.clear() ;
+  mapids.clear() ;
+  map_index.clear() ;
+  mapid2m_index.clear() ;
+  cpcodes.clear() ;
+  vcds.clear() ;
+  regions.clear() ;
+  ghosts.clear() ;
+  serial_start.clear() ;
+  serial_bucket.clear() ;
+  rehashSerialIndex.clear() ;
+  account2id.clear() ;
+  cpcode2accountid.clear() ;
+  arlid2vcd.clear() ;
+  vcdMapNetwork2id.clear() ;
+  vcdMapNetworkId2Extension.clear() ;
+  spatialSampleBucketsOverride.clear() ;
+  ignorePrefetchOverride.clear() ;
+
+  // Reset insertion-index counters
+  num_maps          = 0 ;
+  numcpcodes        = 0 ;
+  numvcds           = 0 ;
+  numregions        = 0 ;
+  numVcdMapNetwork  = 0 ;
+  numAccounts       = 0 ;
+  numReducers       = -1 ;
+
+  // Reset scalar config to initial defaults (must mirror initial values above)
+  network               = 0 ;
+  MAX_SERIAL            = MAX_FF_SERIAL ;
+  start_time_config     = 0 ;
+  end_time_config       = INT_MAX ;
+  prewarmPeriod         = 0 ;
+  prewarmConfigRelative = false ;
+  url_bucket            = 0 ;
+  splitByCpcodes        = 0 ;
+  splitByMapid          = 0 ;
+  splitByArlid          = 0 ;
+  splitByAccount        = 0 ;
+  splitByVcdMapNetwork  = false ;
+  filter_combine        = 1 ;
+  processMissesOnly     = false ;
+  computeBothServedAndMiss = false ;
+  ignoreICP             = true ;
+  ignorePrefetch        = false ;
+  writeSerialInfoFile   = false ;
+  randomSamplingPct     = 100.0 ;
+  rehash_only           = 0 ;
+  deduce_serial         = 0 ;
+  default_serial_bucket = 8 ;
+  rehash_from_0         = 0 ;
+  rehash_range_start    = MAX_SERIAL ;
+  pctJump               = 0.0 ;
+  attemptId             = 0 ;
+  spatialSampleAttempt  = -1 ;
+  spatialSampleBuckets  = 1 ;
+  partition_2           = 0 ;
+  nodelen               = NODELEN ;
+  entryProbabilityPct   = 100.0 ;
+  considerTTL           = false ;
+  region_ip_in_log      = false ;
+  exclude_cpcodes       = false ;
+  exclude_vcds          = false ;
+  exclude_regions       = false ;
+  isMapper              = false ;
+
+  // Free the always-strdup'd output_dir and reset
+  free(output_dir) ;
+  output_dir = NULL ;
+
+  stdtime_extension[0] = '\0' ;
+  maprules[0]          = '\0' ;
 }
 
 std::pair<string, string> getMapNetworkFromExtension (char *ext) {

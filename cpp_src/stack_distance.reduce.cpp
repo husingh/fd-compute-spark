@@ -14,54 +14,106 @@
 #include "stack_distance.reduce.h"
 
 //---------------------------------------------------------------------------
-// Variables
+// Variables — all thread_local so each Spark executor thread (task) gets
+// its own isolated copy, matching Hadoop's per-process isolation.
+// No logic changes anywhere: function bodies are untouched.
 //---------------------------------------------------------------------------
-iat_t *iat;
-stdtime_t *stack_distance_time_ph1;
-md5_t *md5_data;
+thread_local iat_t *iat = nullptr;
+thread_local stdtime_t *stack_distance_time_ph1 = nullptr;
+thread_local md5_t *md5_data = nullptr;
 
-// Internal data structures
-long long *seen;
-long long *objsize;
-double *reftime;
-long long uniqueMissBytes = 0 ;
-long long entryBarrierMissBytes = 0  ;
-long long entryBarrierMissRequests = 0  ;
-int max_id = 0;
-unsigned int *md5_hash;
-unsigned int *md5_hash_overflow;
-unsigned int md5_hash_overflow_depth = 0;
-unsigned int md5_count = 1;
+thread_local long long *seen = nullptr;
+thread_local long long *objsize = nullptr;
+thread_local double *reftime = nullptr;
+thread_local long long uniqueMissBytes = 0 ;
+thread_local long long entryBarrierMissBytes = 0 ;
+thread_local long long entryBarrierMissRequests = 0 ;
+thread_local int max_id = 0;
+thread_local unsigned int *md5_hash = nullptr;
+thread_local unsigned int *md5_hash_overflow = nullptr;
+thread_local unsigned int md5_hash_overflow_depth = 0;
+thread_local unsigned int md5_count = 1;
 
-double start_time=-1,last_time=-1;
-int timelen = TIMELEN ;
-traffic_t *traffic_buckets = NULL ;
+thread_local double start_time = -1, last_time = -1;
+thread_local int timelen = TIMELEN ;
+thread_local traffic_t *traffic_buckets = nullptr ;
 
-std::map<int,serial_info_t> perSerialInfo ;
-std::map<int,int> lastValidated ;
+thread_local std::map<int,serial_info_t> perSerialInfo ;
+thread_local std::map<int,int> lastValidated ;
 
-// Output file handle (local filesystem)
-FILE *g_outfile = NULL ;
+thread_local FILE *g_outfile = nullptr ;
 
-// ---------------------------------------------------------------------------
-// Session state — persists across processReducerBatch() calls.
-// NOTE: these are globals and therefore not thread-safe across concurrent
-// Spark tasks sharing the same JVM. Set spark.executor.cores=1 per task.
-// ---------------------------------------------------------------------------
-static long long g_readcount           = 0 ;
-static long long g_count               = 0 ;
-static long long g_prewarmSkippedCount = 0 ;
-static long long g_total_bytes         = 0 ;
-static long long g_total_count         = 0 ;
-static long long g_total_mib           = 0 ;
-static long long g_sampleSkippedCount  = 0 ;
-static long long g_sampleSkippedBytes  = 0 ;
-static Tree     *g_root                = NULL ;
-static int       g_md5_count_exceeded  = 0 ;
-static bool      g_memory_allocated    = false ;
-static bool      g_doSpatialSampling   = false ;
-static int       g_non_empty           = 0 ;
+// Session state — persists across processReducerBatch() calls for one task.
+// thread_local gives each concurrent task its own copy; reducerReset() clears
+// it between sequential tasks reusing the same thread.
+static thread_local long long g_readcount           = 0 ;
+static thread_local long long g_count               = 0 ;
+static thread_local long long g_prewarmSkippedCount = 0 ;
+static thread_local long long g_total_bytes         = 0 ;
+static thread_local long long g_total_count         = 0 ;
+static thread_local long long g_total_mib           = 0 ;
+static thread_local long long g_sampleSkippedCount  = 0 ;
+static thread_local long long g_sampleSkippedBytes  = 0 ;
+static thread_local Tree     *g_root                = nullptr ;
+static thread_local int       g_md5_count_exceeded  = 0 ;
+static thread_local bool      g_memory_allocated    = false ;
+static thread_local bool      g_doSpatialSampling   = false ;
+static thread_local int       g_non_empty           = 0 ;
 
+
+//---------------------------------------------------------------------------
+// reducerReset — free all heap memory and zero every global so the next
+// reducerInit() starts from a clean slate.  Called at the end of
+// reducerFinalize() so memory is released promptly between partitions.
+//---------------------------------------------------------------------------
+void reducerReset() {
+  // Splay tree: freetree() recursively frees every malloc'd node
+  freetree(g_root) ;
+  g_root = NULL ;
+
+  // calloc/malloc'd arrays from allocate_memory()
+  free(iat) ;                     iat                    = NULL ;
+  free(stack_distance_time_ph1) ; stack_distance_time_ph1 = NULL ;
+  free(md5_data) ;                md5_data               = NULL ;
+  free(seen) ;                    seen                   = NULL ;
+  free(objsize) ;                 objsize                = NULL ;
+  free(reftime) ;                 reftime                = NULL ;
+  free(md5_hash) ;                md5_hash               = NULL ;
+  free(md5_hash_overflow) ;       md5_hash_overflow      = NULL ;
+  free(traffic_buckets) ;         traffic_buckets        = NULL ;
+
+  // Static session counters
+  g_readcount           = 0 ;
+  g_count               = 0 ;
+  g_prewarmSkippedCount = 0 ;
+  g_total_bytes         = 0 ;
+  g_total_count         = 0 ;
+  g_total_mib           = 0 ;
+  g_sampleSkippedCount  = 0 ;
+  g_sampleSkippedBytes  = 0 ;
+  g_md5_count_exceeded  = 0 ;
+  g_memory_allocated    = false ;
+  g_doSpatialSampling   = false ;
+  g_non_empty           = 0 ;
+
+  // Non-static globals
+  uniqueMissBytes          = 0 ;
+  entryBarrierMissBytes    = 0 ;
+  entryBarrierMissRequests = 0 ;
+  max_id                   = 0 ;
+  md5_hash_overflow_depth  = 0 ;
+  md5_count                = 1 ;   // index starts at 1, not 0
+  start_time               = -1 ;
+  last_time                = -1 ;
+  timelen                  = TIMELEN ;
+
+  // STL containers
+  perSerialInfo.clear() ;
+  lastValidated.clear() ;
+
+  // Output file handle (should already be closed by reducerFinalize)
+  g_outfile = NULL ;
+}
 
 //---------------------------------------------------------------------------
 // A bunch of misc functions first
@@ -919,6 +971,12 @@ void reducerFinalize() {
     // Empty
     print_stats(0, 0, 0, stdtime_extension, output_dir, 0, 0) ;
   }
+
+  // Reset all state so the next reducerInit() starts from a clean slate.
+  // Essential when multiple reducer partitions run sequentially in the same
+  // JVM (Spark local mode or multi-task executors on Kubernetes).
+  reducerReset() ;
+  configReset() ;
 }
 
 //---------------------------------------------------------------------------

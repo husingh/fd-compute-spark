@@ -50,7 +50,7 @@ object StackDistancePipelineJob {
   class SerialKeyPartitioner(val numPartitions: Int) extends Partitioner {
     require(numPartitions > 0)
     def getPartition(key: Any): Int = key match {
-      case (k: String, _: Double) => (k.hashCode & Int.MaxValue) % numPartitions
+      case (k: String, _: Double) => (k.toInt % numPartitions + numPartitions) % numPartitions
       case _ => 0
     }
   }
@@ -381,7 +381,7 @@ object StackDistancePipelineJob {
     }
 
     implicit val pairOrdering: Ordering[(String, Double)] =
-      Ordering.Tuple2(Ordering.String, Ordering.Double)
+      Ordering.Tuple2(Ordering.String, Ordering.Double.TotalOrdering)
 
     val sorted = keyed.repartitionAndSortWithinPartitions(
       new SerialKeyPartitioner(numReducers)
