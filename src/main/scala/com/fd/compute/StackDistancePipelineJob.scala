@@ -49,8 +49,18 @@ object StackDistancePipelineJob {
   // -------------------------------------------------------------------------
   class SerialKeyPartitioner(val numPartitions: Int) extends Partitioner {
     require(numPartitions > 0)
+    // Hadoop's actual reference run uses a CUSTOM partitioner, not a hash:
+    // -D mapred.partitioner.class=customPartition.SerialSpacePartitionerMapred
+    // Decompiled customPartition.jar's SerialSpacePartitioner.getPartition()
+    // bytecode confirms it does: Integer.parseInt(firstField) % numPartitions
+    // — a direct numeric modulo on the serial, no hashing at all. (There's a
+    // dead hashCode()/getPartition(int,int) helper pair in the class that is
+    // never actually called from getPartition(K2,V2,int) — leftover from a
+    // base implementation, not used.) The serial is always a small
+    // non-negative int (bounded by FD_MAPREDUCE_URL_BUCKET), so plain Int
+    // parsing and modulo is exact — no overflow/sign concerns.
     def getPartition(key: Any): Int = key match {
-      case (k: String, _: Double) => (k.toInt % numPartitions + numPartitions) % numPartitions
+      case (k: String, _: Double, _: String) => k.toInt % numPartitions
       case _ => 0
     }
   }
@@ -345,6 +355,11 @@ object StackDistancePipelineJob {
       val debugDir = sys.env.getOrElse("FD_DEBUG_DIR", "/tmp/fd_debug")
       println(s"[DEBUG] FD_DEBUG_DUMP=true — saving mapper output to $debugDir/map_output/")
       println(s"[DEBUG] Reducer will NOT run. Re-run without FD_DEBUG_DUMP to do a full run.")
+      // Cache so every action below reads the SAME materialized output,
+      // instead of re-triggering mapperInit/mapperProcessBatch/mapperFinalize
+      // from scratch per action (ruling out cross-call native-state drift
+      // as a source of inconsistent counts between actions).
+      mapOutput.persist(org.apache.spark.storage.StorageLevel.MEMORY_AND_DISK)
       mapOutput.saveAsTextFile(s"$debugDir/map_output")
 
       // Print a summary: line count, unique serial keys, unique md5s, sample lines
@@ -372,16 +387,23 @@ object StackDistancePipelineJob {
     // Composite key (serialKey, timestamp) — same serial → same reducer,
     // sorted by timestamp within each reducer partition.
     // -----------------------------------------------------------------------
+    // Third sort field (the full line) is a deterministic tiebreaker for
+    // records that share the exact same (serial, timestamp) — without it,
+    // relative order among tied records depends on shuffle fetch order and
+    // isn't even stable across repeated Spark runs. This affects only the
+    // order-sensitive header fields (total_mib, uniqueMissBytes) computed
+    // from cache hit/miss simulation; count/bytes/period/max_id are simple
+    // sums unaffected by order.
     val keyed = mapOutput.map { line =>
       val firstColon  = line.indexOf(':')
       val secondColon = line.indexOf(':', firstColon + 1)
       val key = line.substring(0, firstColon)
       val ts  = line.substring(firstColon + 1, secondColon).toDouble
-      ((key, ts), line)
+      ((key, ts, line), line)
     }
 
-    implicit val pairOrdering: Ordering[(String, Double)] =
-      Ordering.Tuple2(Ordering.String, Ordering.Double.TotalOrdering)
+    implicit val tripleOrdering: Ordering[(String, Double, String)] =
+      Ordering.Tuple3(Ordering.String, Ordering.Double, Ordering.String)
 
     val sorted = keyed.repartitionAndSortWithinPartitions(
       new SerialKeyPartitioner(numReducers)
@@ -398,12 +420,12 @@ object StackDistancePipelineJob {
       println(s"[DEBUG] FD_DEBUG_SORT=true — saving sorted shuffle output to $debugDir/sort_output/")
       println(s"[DEBUG] Each part-NNNNN file = one reducer partition.")
       println(s"[DEBUG] Check: all lines in a file share the same serial keys, ordered by timestamp.")
-      sorted.map { case ((key, ts), line) => line }
+      sorted.map { case ((key, ts, _), line) => line }
             .saveAsTextFile(s"$debugDir/sort_output")
 
       // Show a sample from each partition
       sorted.mapPartitionsWithIndex { (partId, iter) =>
-        val lines = iter.take(5).map { case ((key, ts), line) =>
+        val lines = iter.take(5).map { case ((key, ts, _), line) =>
           s"partition=$partId  serial=$key  ts=$ts"
         }
         lines
@@ -453,6 +475,21 @@ object StackDistancePipelineJob {
         val localDir = new java.io.File(localOutputDir)
         localDir.mkdirs()
         log(s"jobRunId=$jobRunId  localOutputDir=$localOutputDir  exists=${localDir.exists()}  cwd=${new java.io.File(".").getAbsolutePath}")
+
+        // This directory is shared by every reducer partition that runs on
+        // this executor (it's keyed only by jobRunId, not by partitionId).
+        // If a previous partition's end-of-task cleanup was skipped (e.g. an
+        // exception thrown after upload but before cleanup), its stdtime.*
+        // file is still sitting here when this partition starts, and this
+        // partition's own "list files in dir" step below would pick it up
+        // and re-upload it under its own name — producing duplicate content
+        // across unrelated, genuinely-empty partitions. Wipe any leftovers
+        // before this partition's reducerInit runs.
+        val staleFiles = Option(localDir.listFiles()).getOrElse(Array.empty)
+        if (staleFiles.nonEmpty) {
+          log(s"WARNING: found ${staleFiles.length} stale file(s) left over from a previous partition in $localOutputDir — deleting before this run")
+          staleFiles.foreach { f => val ok = f.delete(); log(s"  stale-cleanup: ${f.getName} deleted=$ok") }
+        }
 
         log(s"reducerInit(partitionId=$partitionId, numReducers=$numReducers)")
         // Forward all FD_MAPREDUCE_* env vars to C++ via JNI envOverrides, and

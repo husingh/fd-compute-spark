@@ -673,6 +673,22 @@ void print_stats (long long count, long long total_bytes, long long total_mib,
 // Reads config from env vars, sets up timelen, seeds the RNG.
 //---------------------------------------------------------------------------
 void reducerInit() {
+  // Defensive reset on entry, not just reliance on the previous task's
+  // reducerFinalize() having run its cleanup. If a prior Spark task sharing
+  // this OS thread (same executor JVM, thread pool reuse) failed or was
+  // killed after reducerInit()/processReducerBatch() but before reaching
+  // reducerFinalize()'s reducerReset()/configReset() calls, all thread_local
+  // accumulator state (g_total_count, g_total_bytes, the splay tree, md5
+  // tables, g_memory_allocated, etc.) is left dirty from that dead task.
+  // The next unrelated partition reusing this thread would then inherit
+  // that stale, nonzero state and incorrectly emit that dead task's content
+  // as its own — observed directly as byte-identical stdtime output across
+  // unrelated partitions that received zero real input. Resetting here too
+  // guarantees every reducerInit() starts from a guaranteed-clean slate
+  // regardless of how the previous task on this thread ended.
+  reducerReset() ;
+  configReset() ;
+
   setIsMapper(false) ;
   readConfig() ;
   print_config() ;

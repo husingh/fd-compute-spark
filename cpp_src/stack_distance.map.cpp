@@ -277,6 +277,13 @@ static int resolveGhostIp(const char *inputFilename) {
 //               IP resolution only).  Pass "" or NULL if no ghost filter.
 //---------------------------------------------------------------------------
 MapperCtx *mapperInit(const char *inputFilename) {
+  // Defensive reset on entry — mirrors the same fix in reducerInit(). If a
+  // prior mapper task sharing this thread died before reaching
+  // mapperFinalize()'s configReset(), config globals would otherwise carry
+  // over dirty. Low-impact here since all mapper tasks share identical
+  // FD_MAPREDUCE_* config, but cheap and correct to close the gap anyway.
+  configReset() ;
+
   setIsMapper(true) ;
   readConfig() ;
   print_config() ;
