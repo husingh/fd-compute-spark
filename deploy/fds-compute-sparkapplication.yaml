@@ -23,8 +23,8 @@ metadata:
   name: fds-compute-input-creds
   namespace: spark-operator
 stringData:
-  access-key: "6BLEKZUHUJTYTHH5CKZ9"
-  secret-key: "kiSnL86KHrgVNHcgGdLOZTIIhoalVqDv1EM6rFDV"
+  access-key: "<INPUT_S3_ACCESS_KEY>"
+  secret-key: "<INPUT_S3_SECRET_KEY>"
 
 ---
 
@@ -35,8 +35,8 @@ metadata:
   name: fds-compute-output-creds
   namespace: spark-operator
 stringData:
-  access-key: "6BLEKZUHUJTYTHH5CKZ9"
-  secret-key: "kiSnL86KHrgVNHcgGdLOZTIIhoalVqDv1EM6rFDV"
+  access-key: "<OUTPUT_S3_ACCESS_KEY>"
+  secret-key: "<OUTPUT_S3_SECRET_KEY>"
 
 ---
 
@@ -47,7 +47,7 @@ metadata:
   name: fds-compute-encryption-keys
   namespace: spark-operator
 stringData:
-  encryption-keys.json: '{"1": "fpyc32mCUpIaSE0aZgxmiC3Q+HPFGpxqyIDClfhR9lE=", "2": "Og0extQ2dVxp4r9ZzxzDdzpDMSwReZd2rwlDpuZdLgE="}'
+  encryption-keys.json: '{"1": "<INPUT_SSE_C_KEY_1_BASE64>", "2": "<INPUT_SSE_C_KEY_2_BASE64>"}'
 
 ---
 
@@ -58,7 +58,7 @@ metadata:
   name: fds-compute-encryption-keys-output
   namespace: spark-operator
 stringData:
-  encryption-keys.json: '{"1": "fpyc32mCUpIaSE0aZgxmiC3Q+HPFGpxqyIDClfhR9lE=", "2": "Og0extQ2dVxp4r9ZzxzDdzpDMSwReZd2rwlDpuZdLgE="}'
+  encryption-keys.json: '{"1": "<OUTPUT_SSE_C_KEY_1_BASE64>", "2": "<OUTPUT_SSE_C_KEY_2_BASE64>"}'
 
 ---
 
