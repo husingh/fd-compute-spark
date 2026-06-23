@@ -192,7 +192,7 @@ object LocalStackDistancePipelineJob {
     }
 
     implicit val pairOrdering: Ordering[(String, Double)] =
-      Ordering.Tuple2(Ordering.String, Ordering.Double.TotalOrdering)
+      Ordering.Tuple2(Ordering.String, Ordering.Double)
 
     val sorted = keyed.repartitionAndSortWithinPartitions(
       new SerialKeyPartitioner(numReducers)
