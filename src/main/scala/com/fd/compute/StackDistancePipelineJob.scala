@@ -94,7 +94,7 @@ object StackDistancePipelineJob {
    * "s3a://bucket/prefix/file.gz"      → "1" (default)
    */
   def keyIndexOf(s3Path: String): String = {
-    val m = """\.key(\d+)$""".r.findFirstMatchIn(s3Path)
+    val m = """(?i)\.key(\d+)$""".r.findFirstMatchIn(s3Path)
     m.map(_.group(1)).getOrElse("1")
   }
 
@@ -139,12 +139,12 @@ object StackDistancePipelineJob {
           val sseKey    = encryptionKeys.getOrElse(keyIdx,
             throw new IllegalArgumentException(
               s"No encryption key for index '$keyIdx' needed by $varName=$v"))
-          val fileName  = s3Path.split("/").last.replaceAll("""\.key\d+$""", "")
+          val fileName  = s3Path.split("/").last.replaceAll("""(?i)\.key\d+$""", "")
           val localFile = new java.io.File(taskTempDir, fileName)
           println(s"[S3 config] Downloading $varName from $s3Path → ${localFile.getAbsolutePath}")
           val conf = s3aConf(accessKey, secretKey, sseKey)
           val path = new Path(s3Path)
-          val fs   = FileSystem.get(path.toUri, conf)
+          val fs   = FileSystem.newInstance(path.toUri, conf)
           val in   = fs.open(path)
           val out  = new java.io.FileOutputStream(localFile)
           try {
@@ -657,7 +657,9 @@ object StackDistancePipelineJob {
 
           val uploadConf = s3aConf(ak, sk, uploadSseCKey)
           log(s"Creating S3 FileSystem for s3a://$outBucket ...")
-          val s3Fs = FileSystem.get(new java.net.URI(s"s3a://$outBucket"), uploadConf)
+          // newInstance bypasses the FileSystem cache (keyed by URI, not SSE-C key),
+          // ensuring the upload uses the correct output encryption key.
+          val s3Fs = FileSystem.newInstance(new java.net.URI(s"s3a://$outBucket"), uploadConf)
           log("S3 FileSystem created OK")
 
           outputFiles.foreach { f =>
