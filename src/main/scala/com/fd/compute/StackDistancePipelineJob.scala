@@ -210,6 +210,84 @@ object StackDistancePipelineJob {
   }
 
   /**
+   * Hadoop ExpansionFilter parity: read the legacy `path_filter` file and return
+   * a predicate that accepts an input file only if its
+   * <date>/<arl>/<network>/<bucket>/<region> path prefix is listed.
+   *
+   * Mirrors LocalStackDistancePipelineJob.loadPathFilter, but reads the
+   * path_filter file on the driver via the same S3A mechanism the job already
+   * uses for its input/config files (see downloadS3ConfigFiles) — i.e. straight
+   * from its Linode S3 (s3a://) path. A non-S3 path is read with a default
+   * Configuration.
+   *
+   * path_filter line format:  "<date> <arl> <network>:<bucket> <region>"
+   *   e.g.  "2026-05-27 AAR f:z O"  matches  <date>/<arl>/f/z/O/<file>.gz
+   *
+   * Source: env FD_MAPREDUCE_PATH_FILTER_FILE, else conf/sysprop
+   * fd.computation.path.filter. Returns None (no filtering) when unset.
+   *
+   * When the path is on S3 it is read with SSE-C using the same per-file key
+   * index (.keyN suffix → encryptionKeys) as downloadS3ConfigFiles, so an
+   * encrypted path_filter object decrypts correctly. Non-S3 paths (hdfs/local)
+   * are read as-is.
+   */
+  def loadPathFilter(
+    sparkConf:      SparkConf,
+    accessKey:      String,
+    secretKey:      String,
+    encryptionKeys: Map[String, String],
+    basePath:       String
+  ): Option[String => Boolean] = {
+    val pfRaw = sys.env.get("FD_MAPREDUCE_PATH_FILTER_FILE")
+      .orElse(sparkConf.getOption("fd.computation.path.filter"))
+      .orElse(sys.props.get("fd.computation.path.filter"))
+      .map(_.trim).filter(_.nonEmpty)
+    pfRaw.map { raw =>
+      val isS3   = raw.startsWith("s3://") || raw.startsWith("s3a://")
+      val pfPath = if (raw.startsWith("s3://")) "s3a://" + raw.stripPrefix("s3://") else raw
+      val conf =
+        if (isS3) {
+          val keyIdx = keyIndexOf(pfPath)
+          val sseKey = encryptionKeys.getOrElse(keyIdx,
+            throw new IllegalArgumentException(
+              s"No encryption key for index '$keyIdx' needed by path_filter $raw"))
+          s3aConf(accessKey, secretKey, sseKey) // SSE-C, same as the other config files
+        } else {
+          new Configuration()
+        }
+      val p      = new Path(pfPath)
+      // newInstance (not get) so we don't reuse a cached, differently-configured
+      // FileSystem for this URI — same fix as downloadS3ConfigFiles (SSE-C key).
+      val fs     = FileSystem.newInstance(p.toUri, conf)
+      val reader = new BufferedReader(new InputStreamReader(fs.open(p), "UTF-8"))
+      val keys =
+        try {
+          Iterator.continually(reader.readLine()).takeWhile(_ != null)
+            .map(_.trim)
+            .filter(l => l.nonEmpty && !l.startsWith("#"))
+            .flatMap { line =>
+              val tok = line.split("\\s+")
+              // "<date> <arl> <network>:<bucket> <region>"
+              if (tok.length >= 4) {
+                val nb = tok(2).split(":", 2) // network:bucket
+                if (nb.length == 2) Some(s"${tok(0)}/${tok(1)}/${nb(0)}/${nb(1)}/${tok(3)}")
+                else None
+              } else None
+            }.toSet
+        } finally { reader.close(); fs.close() }
+      val base = basePath.stripSuffix("/") + "/"
+      println(s"Loaded ${keys.size} path_filter entr(ies) from $raw")
+      (fullPath: String) => {
+        val rel   = fullPath.stripPrefix(base).stripPrefix("/")
+        val parts = rel.split("/")
+        // <date>/<arl>/<network>/<bucket>/<region>/<file...>
+        parts.length >= 5 &&
+          keys.contains(s"${parts(0)}/${parts(1)}/${parts(2)}/${parts(3)}/${parts(4)}")
+      }
+    }
+  }
+
+  /**
    * Open an SSE-C encrypted, gzip-compressed S3 file and return a lazy line iterator.
    * S3A handles decryption transparently via the SSE-C headers in the Hadoop conf.
    */
@@ -323,7 +401,7 @@ object StackDistancePipelineJob {
       sc.getConf,
       basePath = s"s3a://$s3Bucket/$s3Prefix/"
     )
-    val allFiles: Seq[String] = filterOpt match {
+    val fileFiltered: Seq[String] = filterOpt match {
       case Some(f) =>
         println(s"Applying input filter: $f")
         val kept = rawFiles.filter(f.accept)
@@ -335,6 +413,19 @@ object StackDistancePipelineJob {
         println("Input filter disabled (fd.computation.enableFiltering!=true) — using all files")
         rawFiles
     }
+
+    // Hadoop ExpansionFilter parity: restrict to path_filter-listed
+    // <date>/<arl>/<network>/<bucket>/<region> dirs (e.g. region O only).
+    val allFiles: Seq[String] =
+      loadPathFilter(sc.getConf, accessKey, secretKey, encryptionKeys, s"s3a://$s3Bucket/$s3Prefix/") match {
+        case Some(accept) =>
+          val kept = fileFiltered.filter(accept)
+          println(s"After path_filter: ${kept.size} of ${fileFiltered.size} file(s) kept")
+          kept
+        case None =>
+          println("path_filter disabled (FD_MAPREDUCE_PATH_FILTER_FILE not set) — keeping all files")
+          fileFiltered
+      }
     allFiles.foreach(f => println(s"  $f"))
 
     // Broadcast credentials and keys so executors can access S3

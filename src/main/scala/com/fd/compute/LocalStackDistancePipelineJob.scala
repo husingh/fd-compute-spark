@@ -54,6 +54,56 @@ object LocalStackDistancePipelineJob {
       .toSeq
       .sorted
 
+  /**
+   * Hadoop ExpansionFilter parity: read the legacy `path_filter` file and return
+   * a predicate that accepts a local input file only if its
+   * <date>/<arl>/<network>/<bucket>/<region> path prefix is listed.
+   *
+   * Unlike Hadoop, the local job otherwise reads EVERY .gz under inputDir (no
+   * PathFilter), so it pulls in directories Hadoop excluded — e.g. region `L`,
+   * which holds the bulk of some maps' traffic. Without this filter the local
+   * output contains lines Hadoop never processed.
+   *
+   * path_filter line format:  "<date> <arl> <network>:<bucket> <region>"
+   *   e.g.  "2026-05-27 AAR f:z O"  matches  <date>/<arl>/f/z/O/<file>.gz
+   *
+   * Source: env FD_MAPREDUCE_PATH_FILTER_FILE, else conf/sysprop
+   * fd.computation.path.filter. Returns None (no filtering) when unset.
+   */
+  def loadPathFilter(conf: SparkConf, basePath: String): Option[String => Boolean] = {
+    val pfPath = sys.env.get("FD_MAPREDUCE_PATH_FILTER_FILE")
+      .orElse(conf.getOption("fd.computation.path.filter"))
+      .orElse(sys.props.get("fd.computation.path.filter"))
+      .map(_.trim).filter(_.nonEmpty)
+    pfPath.map { path =>
+      val src = scala.io.Source.fromFile(path)
+      val keys =
+        try {
+          src.getLines()
+            .map(_.trim)
+            .filter(l => l.nonEmpty && !l.startsWith("#"))
+            .flatMap { line =>
+              val tok = line.split("\\s+")
+              // "<date> <arl> <network>:<bucket> <region>"
+              if (tok.length >= 4) {
+                val nb = tok(2).split(":", 2) // network:bucket
+                if (nb.length == 2) Some(s"${tok(0)}/${tok(1)}/${nb(0)}/${nb(1)}/${tok(3)}")
+                else None
+              } else None
+            }.toSet
+        } finally src.close()
+      val base = basePath.stripSuffix("/") + "/"
+      println(s"Loaded ${keys.size} path_filter entr(ies) from $path")
+      (fullPath: String) => {
+        val rel   = fullPath.stripPrefix(base).stripPrefix("/")
+        val parts = rel.split("/")
+        // <date>/<arl>/<network>/<bucket>/<region>/<file...>
+        parts.length >= 5 &&
+          keys.contains(s"${parts(0)}/${parts(1)}/${parts(2)}/${parts(3)}/${parts(4)}")
+      }
+    }
+  }
+
   /** Lazy line iterator over a local gzip file (already decrypted). */
   def readLocalGzipFile(path: String): Iterator[String] = {
     val raw    = new FileInputStream(path)
@@ -104,8 +154,37 @@ object LocalStackDistancePipelineJob {
     numReducers: Int
   ): Unit = {
 
-    val allFiles = listLocalFiles(inputDir)
-    println(s"Found ${allFiles.size} file(s) under $inputDir")
+    val rawFilesUnfiltered = listLocalFiles(inputDir)
+    println(s"Found ${rawFilesUnfiltered.size} file(s) under $inputDir")
+
+    val filterOpt = FdInputFileFilter.fromSparkConf(
+      sc.getConf,
+      basePath = inputDir.stripSuffix("/") + "/"
+    )
+    val fileFiltered: Seq[String] = filterOpt match {
+      case Some(f) =>
+        println(s"Applying input filter: $f")
+        val kept = rawFilesUnfiltered.filter(f.accept)
+        println(s"After filter: ${kept.size} of ${rawFilesUnfiltered.size} file(s) kept " +
+          s"(dates ${f.startDate}..${f.endDate}, " +
+          s"${f.arlSet.size} arl id(s), ${f.comboSet.size} arl:metro combo(s))")
+        kept
+      case None =>
+        println("Input filter disabled (fd.computation.enableFiltering!=true) — using all files")
+        rawFilesUnfiltered
+    }
+
+    // Hadoop ExpansionFilter parity: restrict to path_filter-listed
+    // <date>/<arl>/<network>/<bucket>/<region> dirs (e.g. region O only).
+    val allFiles: Seq[String] = loadPathFilter(sc.getConf, inputDir.stripSuffix("/") + "/") match {
+      case Some(accept) =>
+        val kept = fileFiltered.filter(accept)
+        println(s"After path_filter: ${kept.size} of ${fileFiltered.size} file(s) kept")
+        kept
+      case None =>
+        println("path_filter disabled (FD_MAPREDUCE_PATH_FILTER_FILE not set) — keeping all files")
+        fileFiltered
+    }
     allFiles.foreach(f => println(s"  $f"))
 
     new File(outputDir).mkdirs()
