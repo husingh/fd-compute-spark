@@ -716,7 +716,7 @@ object StackDistancePipelineJob {
         // didn't reach getenv().
         val cwdDir = new java.io.File(".")
         val cwdFiles = Option(cwdDir.listFiles()).getOrElse(Array.empty)
-          .filter(f => f.isFile && f.getName.startsWith("stdtime"))
+          .filter(f => f.isFile && (f.getName.startsWith("stdtime") || f.getName.startsWith("serialInfo")))
         if (cwdFiles.nonEmpty) {
           log(s"Found ${cwdFiles.length} stdtime file(s) in cwd ${cwdDir.getAbsolutePath} — will use these:")
           cwdFiles.foreach(f => log(s"  cwd/${f.getName}  size=${f.length}"))
@@ -734,12 +734,15 @@ object StackDistancePipelineJob {
           }
         }
 
-        val outputFilesPrimary = allFiles.filter(f => f.isFile && f.getName.startsWith("stdtime"))
+        // Upload both stdtime.* and serialInfo.* (when FD_MAPREDUCE_WRITE_SERIAL_INFO_FILE=1
+        // the C++ reducer writes serialInfo.* alongside stdtime.*) to the same S3 prefix.
+        val outputFilesPrimary = allFiles.filter(f =>
+          f.isFile && (f.getName.startsWith("stdtime") || f.getName.startsWith("serialInfo")))
         val outputFiles = if (outputFilesPrimary.nonEmpty) outputFilesPrimary else cwdFiles
-        log(s"stdtime files to upload: ${outputFiles.length} (primary=${outputFilesPrimary.length}, cwdFallback=${cwdFiles.length})")
+        log(s"stdtime/serialInfo files to upload: ${outputFiles.length} (primary=${outputFilesPrimary.length}, cwdFallback=${cwdFiles.length})")
 
         if (outputFiles.isEmpty) {
-          log(s"WARNING: No stdtime.* files found in $localOutputDir — nothing to upload")
+          log(s"WARNING: No stdtime.*/serialInfo.* files found in $localOutputDir — nothing to upload")
         } else {
           // Use the highest-indexed key from the dedicated output encryption keys JSON.
           val outKeyIdx    = outEncKeys.keys.map(_.toInt).max.toString
