@@ -260,29 +260,52 @@ object StackDistancePipelineJob {
       // FileSystem for this URI — same fix as downloadS3ConfigFiles (SSE-C key).
       val fs     = FileSystem.newInstance(p.toUri, conf)
       val reader = new BufferedReader(new InputStreamReader(fs.open(p), "UTF-8"))
-      val keys =
+      // Build independent per-level sets, mirroring Hadoop's ExpansionFilter:
+      //   dateSet, metroSet, typeSet, mapNetworkSet ("type:network"), trafficSet
+      // Each path component is checked against its own set independently — the
+      // same logic ExpansionFilter uses when traversing the directory tree.
+      case class Sets(dates: Set[String], metros: Set[String], types: Set[String],
+                      mapNets: Set[String], traffic: Set[String])
+      val sets =
         try {
+          var dates   = Set.empty[String]
+          var metros  = Set.empty[String]
+          var types   = Set.empty[String]
+          var mapNets = Set.empty[String]
+          var traffic = Set.empty[String]
           Iterator.continually(reader.readLine()).takeWhile(_ != null)
             .map(_.trim)
             .filter(l => l.nonEmpty && !l.startsWith("#"))
-            .flatMap { line =>
+            .foreach { line =>
               val tok = line.split("\\s+")
-              // "<date> <arl> <network>:<bucket> <region>"
+              // "<date> <metro> <type>:<network> <region>"
               if (tok.length >= 4) {
-                val nb = tok(2).split(":", 2) // network:bucket
-                if (nb.length == 2) Some(s"${tok(0)}/${tok(1)}/${nb(0)}/${nb(1)}/${tok(3)}")
-                else None
-              } else None
-            }.toSet
+                dates   += tok(0)
+                metros  += tok(1)
+                val nb   = tok(2).split(":", 2)
+                if (nb.length == 2) {
+                  types   += nb(0)
+                  mapNets += tok(2)   // "type:network" full token
+                }
+                traffic += tok(3)
+              }
+            }
+          Sets(dates, metros, types, mapNets, traffic)
         } finally { reader.close(); fs.close() }
       val base = basePath.stripSuffix("/") + "/"
-      println(s"Loaded ${keys.size} path_filter entr(ies) from $raw")
+      println(s"Loaded path_filter from $raw — " +
+        s"${sets.dates.size} dates, ${sets.mapNets.size} networks, ${sets.traffic.size} regions")
       (fullPath: String) => {
         val rel   = fullPath.stripPrefix(base).stripPrefix("/")
         val parts = rel.split("/")
-        // <date>/<arl>/<network>/<bucket>/<region>/<file...>
-        parts.length >= 5 &&
-          keys.contains(s"${parts(0)}/${parts(1)}/${parts(2)}/${parts(3)}/${parts(4)}")
+        // parts: <date>/<metro>/<type>/<network>/<region>/<file...>
+        // Files (length >= 6) are accepted if every component passes its set.
+        parts.length >= 6 &&
+          sets.dates.contains(parts(0))  &&
+          sets.metros.contains(parts(1)) &&
+          sets.types.contains(parts(2))  &&
+          sets.mapNets.contains(s"${parts(2)}:${parts(3)}") &&
+          sets.traffic.contains(parts(4))
       }
     }
   }
@@ -440,36 +463,20 @@ object StackDistancePipelineJob {
     val bcS3OutputPrefix  = sc.broadcast(s3OutputPrefix)
 
     // -----------------------------------------------------------------------
-    // Stage 1a: Parallelize file list → each task reads one S3 file
-    //           (decrypt SSE-C + decompress gzip → raw log lines)
+    // Stage 1: One C++ mapper per input file (preserves per-file network
+    // context required by FD_MAPREDUCE_SPLIT_BY_VCD_MAP_NETWORK=1).
+    //
+    // Hadoop runs one streaming mapper per file split; the C++ binary reads
+    // the network from the file path and routes records to the correct
+    // VCD×network serial-key space.  Repartitioning before mapping mixes
+    // records from different network directories into a single mapper task,
+    // causing the C++ binary (called with an empty path) to emit records for
+    // ALL network rows of each VCD rather than just the one matching the
+    // source file — producing spurious extra VCDs.  Keeping one partition
+    // per file and passing the real path to mapperInit restores Hadoop parity.
     // -----------------------------------------------------------------------
-    val rawLines = sc.parallelize(allFiles, allFiles.size)
+    val mapOutput = sc.parallelize(allFiles, allFiles.size)
       .mapPartitions { fileIter =>
-        val ak   = bcAccessKey.value
-        val sk   = bcSecretKey.value
-        val keys = bcEncryptionKeys.value
-
-        // S3_INPUT_SSE_C_KEY env var is no longer needed — input keys are loaded
-        // from the mounted input encryption-keys JSON (args(2)) and keyed by
-        // the index embedded in each input file path.
-
-        fileIter.flatMap { s3Path =>
-          val keyIdx = keyIndexOf(s3Path)
-          val sseKey = keys.getOrElse(keyIdx,
-            throw new IllegalArgumentException(
-              s"No encryption key for index '$keyIdx' in file: $s3Path"))
-          val conf = s3aConf(ak, sk, sseKey)
-          readEncryptedGzipFile(s3Path, conf)
-        }
-      }
-
-    // -----------------------------------------------------------------------
-    // Stage 1b: C++ mapper — repartition first so each mapper gets an
-    //           even share of lines (not one partition per file)
-    // -----------------------------------------------------------------------
-    val mapOutput = rawLines
-      .repartition(numMappers)
-      .mapPartitions { iter =>
 
         val ak   = bcAccessKey.value
         val sk   = bcSecretKey.value
@@ -478,37 +485,35 @@ object StackDistancePipelineJob {
         val libPath = s"${org.apache.spark.SparkFiles.getRootDirectory()}/libFDCompute.so"
         FDComputeNative.ensureLoaded(libPath)
 
-        // Download any FD_MAPREDUCE_*_FILE env vars that point to S3 (e.g.
-        // FD_MAPREDUCE_VCD_MAP_NETWORK_FILE / FD_MAPREDUCE_ARL_VCD_TRANSLATION_FILE)
-        // to a task-local temp file, and pass the rewritten local paths to the
-        // JNI layer so readConfig()'s fopen() finds a real path.
-        // Files.createTempDirectory (not a partitionId-keyed path under /tmp)
-        // guarantees a unique directory regardless of speculative execution,
-        // task retries, or concurrent unrelated job runs reusing partition 0..N.
+        // Download FD_MAPREDUCE_*_FILE S3 paths to task-local temp files once
+        // per partition (= per input file), then reuse for all mapperInit calls.
         val cfgTempDir = java.nio.file.Files.createTempDirectory("fd_cfg_map_").toFile
         val mapperEnvOverrides = downloadS3ConfigFiles(ak, sk, keys, cfgTempDir)
         if (mapperEnvOverrides.nonEmpty)
           println(s"[mapper] Env overrides for C++ readConfig:\n${mapperEnvOverrides.linesIterator.map("  " + _).mkString("\n")}")
 
-        val handle = FDComputeNative.mapperInit("", mapperEnvOverrides)
+        fileIter.flatMap { s3Path =>
+          val keyIdx = keyIndexOf(s3Path)
+          val sseKey = keys.getOrElse(keyIdx,
+            throw new IllegalArgumentException(
+              s"No encryption key for index '$keyIdx' in file: $s3Path"))
+          val fileConf = s3aConf(ak, sk, sseKey)
 
-        val outputLines = iter
-          .grouped(mapperBatchSize)
-          .flatMap { batch =>
-            val out = FDComputeNative.mapperProcessBatch(handle, batch.mkString("\n"))
-            if (out == null || out.isEmpty) Iterator.empty
-            else out.linesIterator.filter(_.nonEmpty)
-          }
+          // Pass the actual S3 path so the C++ mapper can determine which
+          // network directory this file belongs to (e.g. "z" from .../f/z/O/...).
+          val handle = FDComputeNative.mapperInit(s3Path, mapperEnvOverrides)
 
-        // Lazy wrapper: calls mapperFinalize only when all output is consumed
-        new Iterator[String] {
-          private var done = false
-          def hasNext: Boolean = {
-            val hn = outputLines.hasNext
-            if (!hn && !done) { done = true; FDComputeNative.mapperFinalize(handle) }
-            hn
-          }
-          def next(): String = outputLines.next()
+          val collected = readEncryptedGzipFile(s3Path, fileConf)
+            .grouped(mapperBatchSize)
+            .flatMap { batch =>
+              val out = FDComputeNative.mapperProcessBatch(handle, batch.mkString("\n"))
+              if (out == null || out.isEmpty) Iterator.empty
+              else out.linesIterator.filter(_.nonEmpty)
+            }
+            .toList  // materialise before mapperFinalize so all lines are processed
+
+          FDComputeNative.mapperFinalize(handle)
+          collected.iterator
         }
       }
 

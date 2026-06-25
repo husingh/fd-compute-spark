@@ -77,29 +77,46 @@ object LocalStackDistancePipelineJob {
       .map(_.trim).filter(_.nonEmpty)
     pfPath.map { path =>
       val src = scala.io.Source.fromFile(path)
-      val keys =
+      // Build independent per-level sets, mirroring Hadoop's ExpansionFilter.
+      case class Sets(dates: Set[String], metros: Set[String], types: Set[String],
+                      mapNets: Set[String], traffic: Set[String])
+      val sets =
         try {
+          var dates   = Set.empty[String]
+          var metros  = Set.empty[String]
+          var types   = Set.empty[String]
+          var mapNets = Set.empty[String]
+          var traffic = Set.empty[String]
           src.getLines()
             .map(_.trim)
             .filter(l => l.nonEmpty && !l.startsWith("#"))
-            .flatMap { line =>
+            .foreach { line =>
               val tok = line.split("\\s+")
-              // "<date> <arl> <network>:<bucket> <region>"
               if (tok.length >= 4) {
-                val nb = tok(2).split(":", 2) // network:bucket
-                if (nb.length == 2) Some(s"${tok(0)}/${tok(1)}/${nb(0)}/${nb(1)}/${tok(3)}")
-                else None
-              } else None
-            }.toSet
+                dates   += tok(0)
+                metros  += tok(1)
+                val nb   = tok(2).split(":", 2)
+                if (nb.length == 2) {
+                  types   += nb(0)
+                  mapNets += tok(2)
+                }
+                traffic += tok(3)
+              }
+            }
+          Sets(dates, metros, types, mapNets, traffic)
         } finally src.close()
       val base = basePath.stripSuffix("/") + "/"
-      println(s"Loaded ${keys.size} path_filter entr(ies) from $path")
+      println(s"Loaded path_filter from $path — " +
+        s"${sets.dates.size} dates, ${sets.mapNets.size} networks, ${sets.traffic.size} regions")
       (fullPath: String) => {
         val rel   = fullPath.stripPrefix(base).stripPrefix("/")
         val parts = rel.split("/")
-        // <date>/<arl>/<network>/<bucket>/<region>/<file...>
-        parts.length >= 5 &&
-          keys.contains(s"${parts(0)}/${parts(1)}/${parts(2)}/${parts(3)}/${parts(4)}")
+        parts.length >= 6 &&
+          sets.dates.contains(parts(0))  &&
+          sets.metros.contains(parts(1)) &&
+          sets.types.contains(parts(2))  &&
+          sets.mapNets.contains(s"${parts(2)}:${parts(3)}") &&
+          sets.traffic.contains(parts(4))
       }
     }
   }

@@ -1,0 +1,284 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# FDS Compute — StackDistancePipelineJob (Expansion / exp_3)
+# Mirrors the Hadoop exp_3_ComputeFD streaming job.
+#
+# Input:  fds-e3testing-bucket-husingh/fd_input_exp/  (SSE-C gzip, key "1")
+# Output: fds-e3testing-bucket-husingh/fd_compute_output/exp_3/run-exp3-20260625-001/
+# Endpoint (all): us-ord-10.linodeobjects.com
+#
+# Hadoop equivalents:
+#   FD_MAPREDUCE_START_TIME=1779840000  (2026-05-27 00:00:00 UTC)
+#   FD_MAPREDUCE_END_TIME=1780012800    (2026-05-29 00:00:00 UTC)
+#   mapreduce.job.reduces=2320
+#   Expansion-specific: SPLIT_BY_VCD_MAP_NETWORK=1, VCD_MAP_NETWORK_FILE,
+#                       ARL_VCD_TRANSLATION_FILE, COMPUTE_BOTH_SERVED_AND_MISS_FDS=1
+#
+# Config files (SSE-C key "1", uploaded by upload_expansion_data.py):
+#   fds-e3testing-bucket-husingh/fd_expansion_configs/fd_compute_customer_map
+#   fds-e3testing-bucket-husingh/fd_expansion_configs/arlid2vcd.conf
+#
+# Apply:
+#   kubectl apply -f deploy/fds-compute-expansion-sparkapplication.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Input bucket credentials ──────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fds-compute-input-creds
+  namespace: spark-operator
+stringData:
+  access-key: "<INPUT_S3_ACCESS_KEY>"
+  secret-key: "<INPUT_S3_SECRET_KEY>"
+
+---
+
+# ── Output bucket credentials ─────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fds-compute-output-creds
+  namespace: spark-operator
+stringData:
+  access-key: "<OUTPUT_S3_ACCESS_KEY>"
+  secret-key: "<OUTPUT_S3_SECRET_KEY>"
+
+---
+
+# ── Input encryption keys ─────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fds-compute-encryption-keys
+  namespace: spark-operator
+stringData:
+  encryption-keys.json: '<INPUT_SSE_C_KEYS_JSON>'
+
+---
+
+# ── Output encryption keys ────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fds-compute-encryption-keys-output
+  namespace: spark-operator
+stringData:
+  encryption-keys.json: '<OUTPUT_SSE_C_KEYS_JSON>'
+
+---
+
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: fds-compute-expansion-pipeline
+  namespace: spark-operator
+
+spec:
+  type: Scala
+  mode: cluster
+  image: "apache/spark:3.5.8-scala2.12-java11-ubuntu"
+  imagePullPolicy: IfNotPresent
+
+  mainClass: com.fd.compute.StackDistancePipelineJob
+  mainApplicationFile: "https://fds-jar.in-maa-1.linodeobjects.com/fd_compute_jar/withExpansionChanges/fd-compute-spark-assembly.jar"
+  sparkVersion: "3.5.0"
+
+  restartPolicy:
+    type: Never
+
+  hadoopConf:
+    "fs.s3a.impl":                "org.apache.hadoop.fs.s3a.S3AFileSystem"
+    "fs.s3a.path.style.access":   "true"
+    "fs.s3a.signing-algorithm":   "S3SignerType"
+    "fs.s3a.checksum.validation": "false"
+    "fs.s3a.connection.ssl.enabled": "true"
+    "fs.s3a.endpoint":            "us-ord-10.linodeobjects.com"
+
+  sparkConf:
+    "spark.serializer":                  "org.apache.spark.serializer.KryoSerializer"
+    "spark.network.timeout":             "800s"
+    "spark.executor.heartbeatInterval":  "60s"
+    "spark.kryoserializer.buffer.max":   "512m"
+    "spark.jars.ivy":                    "/tmp/.ivy2"
+    "spark.task.maxFailures":            "20"
+    "spark.stage.maxConsecutiveAttempts": "100"
+    "spark.shuffle.io.maxRetries":       "10"
+    "spark.shuffle.io.retryWait":        "15s"
+    "spark.driver.extraJavaOptions": >-
+      -Duser.home=/tmp -Djava.library.path=. --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+      --add-opens=java.base/java.lang=ALL-UNNAMED
+      -Dfd.computation.enableFiltering=true
+      -Dfd.computation.date.start=2026-05-27
+      -Dfd.computation.date.end=2026-05-28
+      -Dfile.pattern=AAR:f
+      -Dfd.computation.filter.type=expansion
+    "spark.executor.extraJavaOptions": >-
+      -Duser.home=/tmp -Djava.library.path=. --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+      --add-opens=java.base/java.lang=ALL-UNNAMED
+      -Dfd.computation.enableFiltering=true
+      -Dfd.computation.date.start=2026-05-27
+      -Dfd.computation.date.end=2026-05-28
+      -Dfile.pattern=AAR:f
+      -Dfd.computation.filter.type=expansion
+    # Credentials via Spark Operator secret refs
+    "spark.kubernetes.driver.secretKeyRef.S3_ACCESS_KEY":          "fds-compute-input-creds:access-key"
+    "spark.kubernetes.driver.secretKeyRef.S3_SECRET_KEY":          "fds-compute-input-creds:secret-key"
+    "spark.kubernetes.driver.secretKeyRef.S3_OUTPUT_ACCESS_KEY":   "fds-compute-output-creds:access-key"
+    "spark.kubernetes.driver.secretKeyRef.S3_OUTPUT_SECRET_KEY":   "fds-compute-output-creds:secret-key"
+    "spark.kubernetes.executor.secretKeyRef.S3_ACCESS_KEY":        "fds-compute-input-creds:access-key"
+    "spark.kubernetes.executor.secretKeyRef.S3_SECRET_KEY":        "fds-compute-input-creds:secret-key"
+    "spark.kubernetes.executor.secretKeyRef.S3_OUTPUT_ACCESS_KEY": "fds-compute-output-creds:access-key"
+    "spark.kubernetes.executor.secretKeyRef.S3_OUTPUT_SECRET_KEY": "fds-compute-output-creds:secret-key"
+    "spark.kubernetes.driverEnv.FD_DEBUG_DUMP":    "false"
+    "spark.kubernetes.driverEnv.FD_JOB_RUN_ID":   "run-exp3-20260625-001"
+    "spark.executorEnv.FD_JOB_RUN_ID":            "run-exp3-20260625-001"
+    # ── FD_MAPREDUCE_* — exact values from Hadoop exp_3_ComputeFD command ──────
+    "spark.executorEnv.FD_MAPREDUCE_NETWORK":                       "freeflow"
+    "spark.executorEnv.FD_MAPREDUCE_START_TIME":                    "1779840000"
+    "spark.executorEnv.FD_MAPREDUCE_END_TIME":                      "1780012800"
+    "spark.executorEnv.FD_MAPREDUCE_PREWARM_PERIOD":                "0"
+    "spark.executorEnv.FD_MAPREDUCE_PREWARM_CONFIG_RELATIVE":       "1"
+    "spark.executorEnv.FD_MAPREDUCE_SAMPLE_ON_ATTEMPT":             "0"
+    "spark.executorEnv.FD_MAPREDUCE_SAMPLE_BUCKETS":                "100"
+    "spark.executorEnv.FD_MAPREDUCE_RAM_SIZE":                      "64"
+    "spark.executorEnv.FD_MAPREDUCE_THINNING_PCT_JUMP":             "5"
+    "spark.executorEnv.FD_MAPREDUCE_WRITE_SERIAL_INFO_FILE":        "1"
+    # ── Expansion-specific: VCD/customer-map split ────────────────────────────
+    # downloadS3ConfigFiles() downloads these to a local temp dir per task before
+    # calling mapperInit / reducerInit.  Paths must be s3:// so the download
+    # triggers; they are SSE-C-encrypted with input key "1" on the bucket.
+    "spark.executorEnv.FD_MAPREDUCE_SPLIT_BY_VCD_MAP_NETWORK":     "1"
+    "spark.executorEnv.FD_MAPREDUCE_VCD_MAP_NETWORK_FILE":         "s3://fds-e3testing-bucket-husingh/fd_expansion_configs/fd_compute_customer_map.Key2"
+    "spark.executorEnv.FD_MAPREDUCE_ARL_VCD_TRANSLATION_FILE":     "s3://fds-e3testing-bucket-husingh/fd_expansion_configs/arlid2vcd.conf.Key2"
+    "spark.executorEnv.FD_MAPREDUCE_PATH_FILTER_FILE":             "s3://fds-e3testing-bucket-husingh/fd_expansion_configs/path_filter"
+    "spark.kubernetes.driverEnv.FD_MAPREDUCE_PATH_FILTER_FILE":    "s3://fds-e3testing-bucket-husingh/fd_expansion_configs/path_filter"
+    "spark.executorEnv.FD_MAPREDUCE_COMPUTE_BOTH_SERVED_AND_MISS_FDS": "1"
+    "spark.executorEnv.FD_MAPREDUCE_IGNORE_PREFETCH_LINES":        "1"
+    # ── Per-network sample and prefetch overrides (from Hadoop run) ───────────
+    "spark.executorEnv.FD_MAPREDUCE_SAMPLE_BUCKETS_OVERRIDE":      "mch-ff-lo:f:20:200^mm2:f:400:400^ch002:f:20:20^ch003:f:20:20^ch541:f:20:20^ch542:f:20:20^ch543:f:20:20^ch544:f:20:20^b:f:400:400^ch001:f:20:20^chsc00p:f:20:20^chsc07p:f:20:20^chsc08p:f:20:20^s136:f:20:20^chsc13p:f:20:20^chsc14p:f:20:20^mch-ff-so:f:40:400"
+    "spark.executorEnv.FD_MAPREDUCE_IGNORE_PREFETCH_OVERRIDE":     "mch-ff-lo:f:false^ch002:f:false^ch003:f:false^ch541:f:false^ch542:f:false^ch543:f:false^ch544:f:false^ch001:f:false^chsc00p:f:false^chsc07p:f:false^chsc08p:f:false^s136:f:false^chsc13p:f:false^chsc14p:f:false^mch-ff-so:f:false"
+    "spark.kubernetes.executor.deleteOnTermination":                "true"
+    "spark.kubernetes.executor.maxPodFailures":                     "40"
+
+  # ── Positional args ──────────────────────────────────────────────────────────
+  # [0] input bucket   [1] input prefix   [2] input enc keys
+  # [3] numMappers     [4] numReducers (=hadoop mapreduce.job.reduces=2320)
+  # [5] output prefix  [6] output bucket  [7] output enc keys
+  arguments:
+    - "fds-e3testing-bucket-husingh"
+    - "fd_input_exp/"
+    - "/mnt/encryption-keys/input/encryption-keys.json"
+    - "32"
+    - "2320"
+    - "fd_compute_output/exp_3/run-exp3-20260625-001/"
+    - "fds-e3testing-bucket-husingh"
+    - "/mnt/encryption-keys/output/encryption-keys.json"
+
+  # ── Driver ───────────────────────────────────────────────────────────────────
+  driver:
+    cores: 2
+    memory: "4g"
+    serviceAccount: spark
+    labels:
+      app: fds-compute
+      component: driver
+    env:
+      - name: AWS_REQUEST_CHECKSUM_CALCULATION
+        value: "when_required"
+      - name: S3_ENDPOINT
+        value: "us-ord-10.linodeobjects.com"
+      - name: FD_JOB_RUN_ID
+        value: "run-exp3-20260625-001"
+      - name: FD_MAPREDUCE_NETWORK
+        value: "freeflow"
+      - name: FD_MAPREDUCE_START_TIME
+        value: "1779840000"
+      - name: FD_MAPREDUCE_END_TIME
+        value: "1780012800"
+      - name: FD_MAPREDUCE_PREWARM_PERIOD
+        value: "0"
+      - name: FD_MAPREDUCE_PREWARM_CONFIG_RELATIVE
+        value: "1"
+      - name: FD_MAPREDUCE_SAMPLE_ON_ATTEMPT
+        value: "0"
+      - name: FD_MAPREDUCE_SAMPLE_BUCKETS
+        value: "100"
+      - name: FD_MAPREDUCE_RAM_SIZE
+        value: "64"
+      - name: FD_MAPREDUCE_THINNING_PCT_JUMP
+        value: "5"
+      - name: FD_DEBUG_DUMP
+        value: "false"
+    secrets:
+      - name: fds-compute-encryption-keys
+        path: /mnt/encryption-keys/input
+        secretType: Generic
+      - name: fds-compute-encryption-keys-output
+        path: /mnt/encryption-keys/output
+        secretType: Generic
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      runAsNonRoot: true
+      runAsUser: 185
+
+  # ── Executors ────────────────────────────────────────────────────────────────
+  executor:
+    cores: 1
+    instances: 3
+    memory: "8g"
+    memoryOverhead: "2g"
+    labels:
+      app: fds-compute
+      component: executor
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+                - key: component
+                  operator: In
+                  values:
+                    - executor
+            topologyKey: kubernetes.io/hostname
+    env:
+      - name: AWS_REQUEST_CHECKSUM_CALCULATION
+        value: "when_required"
+      - name: S3_ENDPOINT
+        value: "us-ord-10.linodeobjects.com"
+      - name: FD_JOB_RUN_ID
+        value: "run-exp3-20260625-001"
+      - name: FD_MAPREDUCE_NETWORK
+        value: "freeflow"
+      - name: FD_MAPREDUCE_START_TIME
+        value: "1779840000"
+      - name: FD_MAPREDUCE_END_TIME
+        value: "1780012800"
+      - name: FD_MAPREDUCE_PREWARM_PERIOD
+        value: "0"
+      - name: FD_MAPREDUCE_PREWARM_CONFIG_RELATIVE
+        value: "1"
+      - name: FD_MAPREDUCE_SAMPLE_ON_ATTEMPT
+        value: "0"
+      - name: FD_MAPREDUCE_SAMPLE_BUCKETS
+        value: "100"
+      - name: FD_MAPREDUCE_RAM_SIZE
+        value: "64"
+      - name: FD_MAPREDUCE_THINNING_PCT_JUMP
+        value: "5"
+    secrets:
+      - name: fds-compute-encryption-keys
+        path: /mnt/encryption-keys/input
+        secretType: Generic
+      - name: fds-compute-encryption-keys-output
+        path: /mnt/encryption-keys/output
+        secretType: Generic
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      runAsNonRoot: true
+      runAsUser: 185
